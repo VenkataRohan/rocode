@@ -2,7 +2,15 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { appendFile, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { createAgent, type AgentEvent, type AgentOptions } from "../src/agent.ts";
+import {
+  approveAll,
+  createAgent,
+  type AgentEvent,
+  type AgentOptions,
+  type ApprovalDecision,
+  type ApprovalHandler,
+  type ApprovalRequest,
+} from "../src/agent.ts";
 import { readTool } from "../src/tools/read.ts";
 import { createBashTool } from "../src/tools/bash.ts";
 import type { ToolCall } from "../src/messages.ts";
@@ -19,7 +27,7 @@ afterEach(async () => {
 
 function setup(steps: ScriptedStep[], options: Partial<AgentOptions> = {}) {
   const provider = new FakeProvider(steps);
-  const agent = createAgent({ provider, model: "fake-model", cwd, tools: [readTool], ...options });
+  const agent = createAgent({ provider, model: "fake-model", cwd, tools: [readTool], approve: approveAll, ...options });
   return { agent, provider };
 }
 
@@ -39,6 +47,21 @@ const logTool: Tool<{ label: string; delayMs?: number }> = {
     return { content: `logged ${label}`, isError: false };
   },
 };
+
+/** Like logTool, but each run needs the user's Approval. */
+const guardedLogTool: Tool<{ label: string }> = { ...logTool, name: "guarded_log", requiresApproval: true };
+
+/** An Approval handler that answers with scripted decisions, in order, and records what it was asked. */
+function scriptedApprovals(...decisions: ApprovalDecision[]) {
+  const requests: ApprovalRequest[] = [];
+  const approve: ApprovalHandler = async (request) => {
+    requests.push(request);
+    const decision = decisions.shift();
+    if (!decision) throw new Error(`unexpected Approval request for ${request.toolCall.name}`);
+    return decision;
+  };
+  return { approve, requests };
+}
 
 /** Runs a one-Tool-Call Turn and returns that call's Tool Result Message. */
 async function toolResultFor(toolCall: ToolCall, options: Partial<AgentOptions> = {}) {
@@ -402,6 +425,115 @@ describe("Agent", () => {
         content: "started\n\n(Command was interrupted and killed.)",
       });
       expect(await backgroundProcessAlive()).toBe(false);
+    });
+  });
+
+  describe("Approvals", () => {
+    const logged = () => readFile(join(cwd, "log.txt"), "utf8").catch(() => "");
+
+    test("a Tool that requires Approval asks first, and runs once when allowed once", async () => {
+      const logA = call("c1", "guarded_log", { label: "a" });
+      const { approve, requests } = scriptedApprovals("once");
+      const { agent } = setup([callTools([logA]), reply("done")], { tools: [guardedLogTool], approve });
+
+      const events = await runTurn(agent, "log a");
+
+      expect(events.slice(0, 4)).toEqual([
+        { type: "tool_call_started", toolCall: logA },
+        { type: "approval_requested", toolCall: logA, subject: 'label: "a"' },
+        { type: "approval_resolved", toolCall: logA, decision: "once" },
+        { type: "tool_call_finished", toolCall: logA, isError: false, preview: "logged a" },
+      ]);
+      expect(requests).toEqual([{ toolCall: logA, subject: 'label: "a"' }]);
+      expect(await logged()).toBe("a\n");
+    });
+
+    test("a denied Tool Call doesn't run; the Model is told the user denied it and the Turn continues", async () => {
+      const logA = call("c1", "guarded_log", { label: "a" });
+      const { approve } = scriptedApprovals("deny");
+      const { agent, provider } = setup([callTools([logA]), reply("Okay, I won't.")], { tools: [guardedLogTool], approve });
+
+      const events = await runTurn(agent, "log a");
+
+      expect(events).toContainEqual({ type: "approval_resolved", toolCall: logA, decision: "deny" });
+      expect(events.at(-1)).toEqual({ type: "turn_finished", reason: "completed" });
+      expect(await logged()).toBe("");
+      const denial = {
+        role: "tool_result",
+        toolCallId: "c1",
+        toolName: "guarded_log",
+        content: "The user denied this guarded_log call, so it did not run. Try a different approach, or ask the user how to proceed.",
+        isError: true,
+      } as const;
+      expect(provider.requests.at(-1)!.at(-1)).toEqual(denial);
+    });
+
+    test('"always" stops asking for that Tool for the rest of the Session, but not for other Tools', async () => {
+      const otherTool: Tool<{ label: string }> = { ...guardedLogTool, name: "other_log" };
+      const { approve, requests } = scriptedApprovals("always", "once");
+      const { agent } = setup(
+        [
+          callTools([call("c1", "guarded_log", { label: "a" }), call("c2", "guarded_log", { label: "b" })]),
+          reply("done"),
+          callTools([call("c3", "guarded_log", { label: "c" }), call("c4", "other_log", { label: "d" })]),
+          reply("done"),
+        ],
+        { tools: [guardedLogTool, otherTool], approve },
+      );
+
+      await runTurn(agent, "log a and b");
+      const secondTurn = await runTurn(agent, "log c and d");
+
+      expect(requests.map((r) => r.toolCall.id)).toEqual(["c1", "c4"]);
+      expect(secondTurn.filter((e) => e.type === "approval_requested").map((e) => "toolCall" in e && e.toolCall.id)).toEqual(["c4"]);
+      expect(await logged()).toBe("a\nb\nc\nd\n");
+    });
+
+    test('"always" grants belong to one Session: a new Agent asks again', async () => {
+      const first = scriptedApprovals("always");
+      await toolResultFor(call("c1", "guarded_log", { label: "a" }), { tools: [guardedLogTool], approve: first.approve });
+      const second = scriptedApprovals("once");
+      await toolResultFor(call("c1", "guarded_log", { label: "b" }), { tools: [guardedLogTool], approve: second.approve });
+
+      expect(second.requests).toHaveLength(1);
+    });
+
+    test("read never asks", async () => {
+      await writeFile(join(cwd, "a.txt"), "hi\n");
+      const { approve, requests } = scriptedApprovals();
+
+      const result = await toolResultFor(call("c1", "read", { path: "a.txt" }), { approve });
+
+      expect(result).toMatchObject({ isError: false, content: "1\thi" });
+      expect(requests).toEqual([]);
+    });
+
+    test("an invalid Tool Call is rejected without asking", async () => {
+      const { approve, requests } = scriptedApprovals();
+
+      const result = await toolResultFor(call("c1", "guarded_log", {}), { tools: [guardedLogTool], approve });
+
+      expect(result.isError).toBe(true);
+      expect(requests).toEqual([]);
+    });
+
+    test("bash asks with the full command", async () => {
+      const command = `echo ${"x".repeat(200)} && echo done`;
+      const { approve, requests } = scriptedApprovals("once");
+
+      await toolResultFor(call("c1", "bash", { command }), { tools: [createBashTool()], approve });
+
+      expect(requests.map((r) => r.subject)).toEqual([command]);
+    });
+
+    test("yolo approves every Tool Call without asking the user", async () => {
+      const result = await toolResultFor(call("c1", "bash", { command: "echo hi > out.txt" }), {
+        tools: [createBashTool()],
+        approve: approveAll,
+      });
+
+      expect(result).toMatchObject({ isError: false });
+      expect(await readFile(join(cwd, "out.txt"), "utf8")).toBe("hi\n");
     });
   });
 });

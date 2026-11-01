@@ -28,6 +28,7 @@ export function createBashTool({ timeoutMs = DEFAULT_BASH_TIMEOUT_MS } = {}): To
       required: ["command"],
     },
     requiresApproval: true,
+    approvalSubject: ({ command }) => command,
 
     execute({ command }, { cwd, signal }) {
       if (signal.aborted) return Promise.resolve(error(NOT_RUN));

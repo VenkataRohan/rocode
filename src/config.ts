@@ -14,19 +14,21 @@ export type Config = {
   maxSteps: number;
   /** How long a `bash` command may run before it is killed. */
   bashTimeoutSeconds: number;
+  /** Skip all Approvals. CLI flag only, so a config file can't silently turn off safety. */
+  yolo: boolean;
 };
 
 /** Unvalidated values from the config file or CLI flags. */
 type RawConfig = Partial<{ provider: string; model: string; maxSteps: number; bashTimeoutSeconds: number }>;
 
-const DEFAULTS: Config = {
+const DEFAULTS: Omit<Config, "yolo"> = {
   provider: "openrouter",
   model: "google/gemma-4-31b-it:free",
   maxSteps: DEFAULT_MAX_STEPS,
   bashTimeoutSeconds: DEFAULT_BASH_TIMEOUT_MS / 1000,
 };
 
-const USAGE = "Usage: rocode [--provider <name>] [--model <id>] [--max-steps <n>] [--bash-timeout <seconds>]";
+const USAGE = "Usage: rocode [--provider <name>] [--model <id>] [--max-steps <n>] [--bash-timeout <seconds>] [--yolo]";
 
 /** Thrown for anything the user must fix before rocode can start. */
 export class ConfigError extends Error {}
@@ -48,11 +50,12 @@ export async function loadConfig(
     model: merged.model,
     maxSteps: merged.maxSteps,
     bashTimeoutSeconds: merged.bashTimeoutSeconds,
+    yolo: flags.yolo ?? false,
   };
 }
 
-function parseFlags(argv: string[]): RawConfig {
-  let values: { provider?: string; model?: string; "max-steps"?: string; "bash-timeout"?: string };
+function parseFlags(argv: string[]): RawConfig & { yolo?: true } {
+  let values: { provider?: string; model?: string; "max-steps"?: string; "bash-timeout"?: string; yolo?: boolean };
   try {
     ({ values } = parseArgs({
       args: argv,
@@ -61,6 +64,7 @@ function parseFlags(argv: string[]): RawConfig {
         model: { type: "string" },
         "max-steps": { type: "string" },
         "bash-timeout": { type: "string" },
+        yolo: { type: "boolean" },
       },
       strict: true,
       allowPositionals: false,
@@ -69,9 +73,10 @@ function parseFlags(argv: string[]): RawConfig {
     throw new ConfigError(`${(err as Error).message}\n${USAGE}`);
   }
 
-  const out: RawConfig = {};
+  const out: RawConfig & { yolo?: true } = {};
   if (values.provider !== undefined) out.provider = values.provider;
   if (values.model !== undefined) out.model = values.model;
+  if (values.yolo) out.yolo = true;
   if (values["max-steps"] !== undefined) {
     const n = Number(values["max-steps"]);
     if (!isPositiveInteger(n)) throw new ConfigError(`--max-steps must be a positive integer.\n${USAGE}`);

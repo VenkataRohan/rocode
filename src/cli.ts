@@ -1,7 +1,7 @@
 #!/usr/bin/env bun
 import { ConfigError, loadConfig, type Config } from "./config.ts";
 import type { Provider } from "./provider.ts";
-import { createAgent } from "./agent.ts";
+import { approveAll, createAgent } from "./agent.ts";
 import { createOpenRouterProvider } from "./providers/openrouter.ts";
 import { runRepl } from "./repl.ts";
 import { createBashTool } from "./tools/bash.ts";
@@ -25,14 +25,19 @@ function createProvider(config: Config, env: NodeJS.ProcessEnv): Provider {
 try {
   const config = await loadConfig(process.argv.slice(2));
   const provider = createProvider(config, process.env);
-  const agent = createAgent({
-    provider,
-    model: config.model,
-    tools: [readTool, createBashTool({ timeoutMs: config.bashTimeoutSeconds * 1000 })],
-    cwd: process.cwd(),
-    maxSteps: config.maxSteps,
+  const tools = [readTool, createBashTool({ timeoutMs: config.bashTimeoutSeconds * 1000 })];
+  await runRepl({
+    createAgent: (askUser) =>
+      createAgent({
+        provider,
+        model: config.model,
+        tools,
+        cwd: process.cwd(),
+        approve: config.yolo ? approveAll : askUser,
+        maxSteps: config.maxSteps,
+      }),
+    header: `${provider.name} · ${config.model}${config.yolo ? " · yolo: Approvals off" : ""}`,
   });
-  await runRepl({ agent, header: `${provider.name} · ${config.model}` });
 } catch (err) {
   if (err instanceof ConfigError) {
     console.error(`rocode: ${err.message}`);

@@ -3,7 +3,7 @@
 
 import type { AssistantMessage, Message, ToolCall } from "./messages.ts";
 import type { Provider, ProviderError } from "./provider.ts";
-import { createToolRegistry, type Tool } from "./tools/tool.ts";
+import { createToolRegistry, errorResult, type Tool, type ToolResult } from "./tools/tool.ts";
 
 export type TurnFinishReason =
   | "completed" // the Model replied without Tool Calls
@@ -13,9 +13,26 @@ export type TurnFinishReason =
 export type AgentEvent =
   | { type: "text_delta"; text: string }
   | { type: "tool_call_started"; toolCall: ToolCall }
+  | { type: "approval_requested"; toolCall: ToolCall; subject: string }
+  | { type: "approval_resolved"; toolCall: ToolCall; decision: ApprovalDecision }
   | { type: "tool_call_finished"; toolCall: ToolCall; isError: boolean; preview: string }
   | { type: "step_finished"; step: number }
   | { type: "turn_finished"; reason: TurnFinishReason; error?: ProviderError };
+
+/** How the user answered an Approval: allow this Tool Call, allow the Tool for the rest of the Session, or refuse. */
+export type ApprovalDecision = "once" | "always" | "deny";
+
+export type ApprovalRequest = {
+  toolCall: ToolCall;
+  /** What will happen, e.g. the full command or the path. */
+  subject: string;
+};
+
+/** Asks the user whether a Tool Call may run. */
+export type ApprovalHandler = (request: ApprovalRequest, signal: AbortSignal) => Promise<ApprovalDecision>;
+
+/** Allows everything without asking (`--yolo`). */
+export const approveAll: ApprovalHandler = async () => "once";
 
 export type AgentOptions = {
   provider: Provider;
@@ -23,6 +40,8 @@ export type AgentOptions = {
   tools: Tool[];
   /** Working directory Tools act in. */
   cwd: string;
+  /** Asked before each run of a Tool that requires Approval, unless the user already allowed that Tool always. */
+  approve: ApprovalHandler;
   /** Most Steps one Turn may take before it is stopped. */
   maxSteps?: number;
 };
@@ -37,9 +56,28 @@ export type Agent = {
 };
 
 export function createAgent(options: AgentOptions): Agent {
-  const { provider, model, cwd, maxSteps = DEFAULT_MAX_STEPS } = options;
+  const { provider, model, cwd, approve, maxSteps = DEFAULT_MAX_STEPS } = options;
   const registry = createToolRegistry(options.tools);
   const messages: Message[] = [];
+  /** Tools the user allowed "always". Lives only as long as this Agent, so grants never outlast the Session. */
+  const alwaysAllowed = new Set<string>();
+
+  /** Asks for Approval if needed, then runs the Tool Call. Yields Approval events; returns the Tool Result. */
+  async function* approveAndRun(toolCall: ToolCall, signal: AbortSignal): AsyncGenerator<AgentEvent, ToolResult> {
+    const prepared = registry.prepare(toolCall);
+    if ("error" in prepared) return prepared.error;
+
+    const { tool } = prepared;
+    if (tool.requiresApproval && !alwaysAllowed.has(tool.name)) {
+      const { subject } = prepared;
+      yield { type: "approval_requested", toolCall, subject };
+      const decision = await approve({ toolCall, subject }, signal);
+      yield { type: "approval_resolved", toolCall, decision };
+      if (decision === "deny") return errorResult(denied(tool.name));
+      if (decision === "always") alwaysAllowed.add(tool.name);
+    }
+    return prepared.run({ cwd, signal });
+  }
 
   async function* runTurn(text: string, signal: AbortSignal): AsyncGenerator<AgentEvent> {
     messages.push({ role: "user", content: text });
@@ -67,7 +105,7 @@ export function createAgent(options: AgentOptions): Agent {
 
       for (const toolCall of reply.toolCalls) {
         yield { type: "tool_call_started", toolCall };
-        const result = await registry.run(toolCall, { cwd, signal });
+        const result = yield* approveAndRun(toolCall, signal);
         messages.push({
           role: "tool_result",
           toolCallId: toolCall.id,
@@ -91,6 +129,10 @@ export function createAgent(options: AgentOptions): Agent {
   }
 
   return { messages, runTurn };
+}
+
+function denied(toolName: string): string {
+  return `The user denied this ${toolName} call, so it did not run. Try a different approach, or ask the user how to proceed.`;
 }
 
 /** The first line of a Tool Result, plus how many lines were left out. */
