@@ -4,6 +4,7 @@ import type { Provider } from "./provider.ts";
 import { createAgent } from "./agent.ts";
 import { createOpenRouterProvider } from "./providers/openrouter.ts";
 import { runRepl } from "./repl.ts";
+import { createBashTool } from "./tools/bash.ts";
 import { readTool } from "./tools/read.ts";
 
 function createProvider(config: Config, env: NodeJS.ProcessEnv): Provider {
@@ -27,7 +28,7 @@ try {
   const agent = createAgent({
     provider,
     model: config.model,
-    tools: [readTool],
+    tools: [readTool, createBashTool({ timeoutMs: config.bashTimeoutSeconds * 1000 })],
     cwd: process.cwd(),
     maxSteps: config.maxSteps,
   });

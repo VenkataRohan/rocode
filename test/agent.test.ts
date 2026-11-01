@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createAgent, type AgentEvent, type AgentOptions } from "../src/agent.ts";
 import { readTool } from "../src/tools/read.ts";
+import { createBashTool } from "../src/tools/bash.ts";
 import type { ToolCall } from "../src/messages.ts";
 import type { Tool } from "../src/tools/tool.ts";
 import { call, callTools, FakeProvider, reply, type ScriptedStep } from "./support/fake-provider.ts";
@@ -306,6 +307,101 @@ describe("Agent", () => {
       const result = await toolResultFor(call("c1", "read", { path: "empty.txt" }));
 
       expect(result).toMatchObject({ isError: false, content: "(empty.txt is empty)" });
+    });
+  });
+
+  describe("bash", () => {
+    const bash = (command: string, options: { timeoutMs?: number } = {}) =>
+      toolResultFor(call("c1", "bash", { command }), { tools: [createBashTool(options)] });
+
+    /** Starts a long-lived background process and records its pid, to check later that it was killed. */
+    const BACKGROUND_SLEEP = "sleep 30 & echo $! > bg.pid";
+    async function backgroundProcessAlive() {
+      const pid = Number(await readFile(join(cwd, "bg.pid"), "utf8"));
+      await Bun.sleep(50); // let the kernel reap it
+      try {
+        process.kill(pid, 0);
+        return true;
+      } catch {
+        return false;
+      }
+    }
+
+    test("runs in the working directory and returns combined output with the exit code", async () => {
+      await writeFile(join(cwd, "hello.txt"), "hi\n");
+
+      const result = await bash("ls; echo oops >&2; echo done");
+
+      expect(result).toMatchObject({ isError: false, content: "hello.txt\noops\ndone\n\n(exit code 0)" });
+    });
+
+    test("a non-zero exit is reported to the Model and the Turn carries on", async () => {
+      const result = await bash("echo failing tests; exit 3");
+
+      expect(result).toMatchObject({ isError: false, content: "failing tests\n\n(exit code 3)" });
+    });
+
+    test("a command with no output says so", async () => {
+      const result = await bash("true");
+
+      expect(result).toMatchObject({ isError: false, content: "(no output)\n(exit code 0)" });
+    });
+
+    test("multi-byte characters survive large output", async () => {
+      const result = await bash("for i in $(seq 50000); do printf 'é'; done");
+
+      expect(result.content).toBe(`${"é".repeat(50000)}\n\n(exit code 0)`);
+    });
+
+    test("finishes when the command does, killing processes it left in the background", async () => {
+      const started = Date.now();
+
+      const result = await bash(`echo hi; ${BACKGROUND_SLEEP}`, { timeoutMs: 5000 });
+
+      expect(Date.now() - started).toBeLessThan(2000);
+      expect(result).toMatchObject({ isError: false, content: "hi\n\n(exit code 0)" });
+      expect(await backgroundProcessAlive()).toBe(false);
+    });
+
+    test("a command that runs too long is killed, with its partial output and a timeout note", async () => {
+      const started = Date.now();
+
+      const result = await bash(`echo started; ${BACKGROUND_SLEEP}; wait`, { timeoutMs: 100 });
+
+      expect(Date.now() - started).toBeLessThan(2000);
+      expect(result).toMatchObject({
+        isError: true,
+        content: "started\n\n(Command timed out after 0.1s and was killed.)",
+      });
+      expect(await backgroundProcessAlive()).toBe(false);
+    });
+
+    test("a process that escapes the process group can't stretch the timeout", async () => {
+      const started = Date.now();
+
+      const result = await bash("perl -e 'setpgrp(0, 0); sleep 3' & wait", { timeoutMs: 100 });
+
+      expect(Date.now() - started).toBeLessThan(2000);
+      expect(result.isError).toBe(true);
+    });
+
+    test("interrupting the Turn kills the running command", async () => {
+      const { agent } = setup(
+        [callTools([call("c1", "bash", { command: `echo started; ${BACKGROUND_SLEEP}; wait` })]), reply("ok")],
+        { tools: [createBashTool()] },
+      );
+      const controller = new AbortController();
+      setTimeout(() => controller.abort(), 100);
+      const started = Date.now();
+
+      for await (const _ of agent.runTurn("go", controller.signal));
+
+      expect(Date.now() - started).toBeLessThan(2000);
+      expect(agent.messages.find((m) => m.role === "tool_result")).toMatchObject({
+        isError: true,
+        content: "started\n\n(Command was interrupted and killed.)",
+      });
+      expect(await backgroundProcessAlive()).toBe(false);
     });
   });
 });

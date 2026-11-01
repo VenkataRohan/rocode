@@ -2,6 +2,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { parseArgs } from "node:util";
 import { DEFAULT_MAX_STEPS } from "./agent.ts";
+import { DEFAULT_BASH_TIMEOUT_MS } from "./tools/bash.ts";
 
 export const PROVIDERS = ["openrouter"] as const;
 export type ProviderName = (typeof PROVIDERS)[number];
@@ -11,18 +12,21 @@ export type Config = {
   model: string;
   /** Most Steps one Turn may take. */
   maxSteps: number;
+  /** How long a `bash` command may run before it is killed. */
+  bashTimeoutSeconds: number;
 };
 
 /** Unvalidated values from the config file or CLI flags. */
-type RawConfig = Partial<{ provider: string; model: string; maxSteps: number }>;
+type RawConfig = Partial<{ provider: string; model: string; maxSteps: number; bashTimeoutSeconds: number }>;
 
 const DEFAULTS: Config = {
   provider: "openrouter",
   model: "google/gemma-4-31b-it:free",
   maxSteps: DEFAULT_MAX_STEPS,
+  bashTimeoutSeconds: DEFAULT_BASH_TIMEOUT_MS / 1000,
 };
 
-const USAGE = "Usage: rocode [--provider <name>] [--model <id>] [--max-steps <n>]";
+const USAGE = "Usage: rocode [--provider <name>] [--model <id>] [--max-steps <n>] [--bash-timeout <seconds>]";
 
 /** Thrown for anything the user must fix before rocode can start. */
 export class ConfigError extends Error {}
@@ -39,11 +43,16 @@ export async function loadConfig(
   const flags = parseFlags(argv);
   const file = await readConfigFile(join(configDir(env), "config.json"));
   const merged = { ...DEFAULTS, ...file, ...flags };
-  return { provider: checkProvider(merged.provider), model: merged.model, maxSteps: merged.maxSteps };
+  return {
+    provider: checkProvider(merged.provider),
+    model: merged.model,
+    maxSteps: merged.maxSteps,
+    bashTimeoutSeconds: merged.bashTimeoutSeconds,
+  };
 }
 
 function parseFlags(argv: string[]): RawConfig {
-  let values: { provider?: string; model?: string; "max-steps"?: string };
+  let values: { provider?: string; model?: string; "max-steps"?: string; "bash-timeout"?: string };
   try {
     ({ values } = parseArgs({
       args: argv,
@@ -51,6 +60,7 @@ function parseFlags(argv: string[]): RawConfig {
         provider: { type: "string" },
         model: { type: "string" },
         "max-steps": { type: "string" },
+        "bash-timeout": { type: "string" },
       },
       strict: true,
       allowPositionals: false,
@@ -66,6 +76,11 @@ function parseFlags(argv: string[]): RawConfig {
     const n = Number(values["max-steps"]);
     if (!isPositiveInteger(n)) throw new ConfigError(`--max-steps must be a positive integer.\n${USAGE}`);
     out.maxSteps = n;
+  }
+  if (values["bash-timeout"] !== undefined) {
+    const n = Number(values["bash-timeout"]);
+    if (!isTimeoutSeconds(n)) throw new ConfigError(`--bash-timeout ${TIMEOUT_RULE}\n${USAGE}`);
+    out.bashTimeoutSeconds = n;
   }
   return out;
 }
@@ -100,11 +115,24 @@ async function readConfigFile(path: string): Promise<RawConfig> {
     }
     out.maxSteps = values.maxSteps;
   }
+  if (values.bashTimeoutSeconds !== undefined) {
+    if (!isTimeoutSeconds(values.bashTimeoutSeconds)) {
+      throw new ConfigError(`"bashTimeoutSeconds" in ${path} ${TIMEOUT_RULE}`);
+    }
+    out.bashTimeoutSeconds = values.bashTimeoutSeconds;
+  }
   return out;
 }
 
 function isPositiveInteger(value: unknown): value is number {
   return typeof value === "number" && Number.isInteger(value) && value > 0;
+}
+
+const MAX_TIMEOUT_SECONDS = 24 * 60 * 60;
+const TIMEOUT_RULE = `must be a number of seconds greater than 0 and at most ${MAX_TIMEOUT_SECONDS}.`;
+
+function isTimeoutSeconds(value: unknown): value is number {
+  return typeof value === "number" && value > 0 && value <= MAX_TIMEOUT_SECONDS;
 }
 
 function checkProvider(name: string): ProviderName {
