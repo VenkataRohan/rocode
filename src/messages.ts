@@ -10,8 +10,10 @@ export type Usage = {
 export type ToolCall = {
   id: string;
   name: string;
-  /** Already parsed from the Provider's wire format. */
+  /** Already parsed from the Provider's wire format; null when they weren't valid JSON. */
   arguments: unknown;
+  /** The Model's raw argument text, present only when it wasn't valid JSON. */
+  unparsedArguments?: string;
 };
 
 export type UserMessage = {

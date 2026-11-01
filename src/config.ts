@@ -1,6 +1,7 @@
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { parseArgs } from "node:util";
+import { DEFAULT_MAX_STEPS } from "./agent.ts";
 
 export const PROVIDERS = ["openrouter"] as const;
 export type ProviderName = (typeof PROVIDERS)[number];
@@ -8,17 +9,20 @@ export type ProviderName = (typeof PROVIDERS)[number];
 export type Config = {
   provider: ProviderName;
   model: string;
+  /** Most Steps one Turn may take. */
+  maxSteps: number;
 };
 
-const CONFIG_KEYS = ["provider", "model"] as const satisfies readonly (keyof Config)[];
-
-/** Unvalidated string values from the config file or CLI flags. */
-type RawConfig = Partial<Record<(typeof CONFIG_KEYS)[number], string>>;
+/** Unvalidated values from the config file or CLI flags. */
+type RawConfig = Partial<{ provider: string; model: string; maxSteps: number }>;
 
 const DEFAULTS: Config = {
   provider: "openrouter",
   model: "google/gemma-4-31b-it:free",
+  maxSteps: DEFAULT_MAX_STEPS,
 };
+
+const USAGE = "Usage: rocode [--provider <name>] [--model <id>] [--max-steps <n>]";
 
 /** Thrown for anything the user must fix before rocode can start. */
 export class ConfigError extends Error {}
@@ -35,23 +39,35 @@ export async function loadConfig(
   const flags = parseFlags(argv);
   const file = await readConfigFile(join(configDir(env), "config.json"));
   const merged = { ...DEFAULTS, ...file, ...flags };
-  return { provider: checkProvider(merged.provider), model: merged.model };
+  return { provider: checkProvider(merged.provider), model: merged.model, maxSteps: merged.maxSteps };
 }
 
 function parseFlags(argv: string[]): RawConfig {
+  let values: { provider?: string; model?: string; "max-steps"?: string };
   try {
-    const { values } = parseArgs({
+    ({ values } = parseArgs({
       args: argv,
-      options: Object.fromEntries(CONFIG_KEYS.map((key) => [key, { type: "string" as const }])),
+      options: {
+        provider: { type: "string" },
+        model: { type: "string" },
+        "max-steps": { type: "string" },
+      },
       strict: true,
       allowPositionals: false,
-    });
-    return Object.fromEntries(
-      Object.entries(values).filter(([, v]) => typeof v === "string"),
-    ) as RawConfig;
+    }));
   } catch (err) {
-    throw new ConfigError(`${(err as Error).message}\nUsage: rocode [--provider <name>] [--model <id>]`);
+    throw new ConfigError(`${(err as Error).message}\n${USAGE}`);
   }
+
+  const out: RawConfig = {};
+  if (values.provider !== undefined) out.provider = values.provider;
+  if (values.model !== undefined) out.model = values.model;
+  if (values["max-steps"] !== undefined) {
+    const n = Number(values["max-steps"]);
+    if (!isPositiveInteger(n)) throw new ConfigError(`--max-steps must be a positive integer.\n${USAGE}`);
+    out.maxSteps = n;
+  }
+  return out;
 }
 
 async function readConfigFile(path: string): Promise<RawConfig> {
@@ -67,17 +83,28 @@ async function readConfigFile(path: string): Promise<RawConfig> {
   if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
     throw new ConfigError(`${path} must contain a JSON object.`);
   }
+  const values = raw as Record<string, unknown>;
 
   const out: RawConfig = {};
-  for (const key of CONFIG_KEYS) {
-    const value = (raw as Record<string, unknown>)[key];
+  for (const key of ["provider", "model"] as const) {
+    const value = values[key];
     if (value === undefined) continue;
     if (typeof value !== "string" || value === "") {
       throw new ConfigError(`"${key}" in ${path} must be a non-empty string.`);
     }
     out[key] = value;
   }
+  if (values.maxSteps !== undefined) {
+    if (!isPositiveInteger(values.maxSteps)) {
+      throw new ConfigError(`"maxSteps" in ${path} must be a positive integer.`);
+    }
+    out.maxSteps = values.maxSteps;
+  }
   return out;
+}
+
+function isPositiveInteger(value: unknown): value is number {
+  return typeof value === "number" && Number.isInteger(value) && value > 0;
 }
 
 function checkProvider(name: string): ProviderName {

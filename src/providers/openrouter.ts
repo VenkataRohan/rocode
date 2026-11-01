@@ -1,7 +1,7 @@
 // OpenRouter Provider: OpenAI Chat Completions over SSE, hand-rolled (see ADR 0001).
 // All wire-format JSON stays inside this module.
 
-import type { Message } from "../messages.ts";
+import type { Message, ToolCall } from "../messages.ts";
 import type { HttpFn, Provider, ProviderError, ProviderEvent, StreamRequest } from "../provider.ts";
 import { readSseData } from "./sse.ts";
 
@@ -27,8 +27,18 @@ type WireMessage =
     }
   | { role: "tool"; tool_call_id: string; content: string };
 
+/** One piece of a streamed Tool Call; `id` and `name` arrive once, `arguments` in fragments. */
+type WireToolCallDelta = {
+  index: number;
+  id?: string;
+  function?: { name?: string; arguments?: string };
+};
+
 type WireChunk = {
-  choices?: { delta?: { content?: string | null } }[];
+  choices?: {
+    delta?: { content?: string | null; tool_calls?: WireToolCallDelta[] };
+    finish_reason?: string | null;
+  }[];
   usage?: { prompt_tokens?: number; completion_tokens?: number };
   /** OpenRouter reports failures after the 200 status as a chunk carrying `error`. */
   error?: { code?: string | number; message?: string };
@@ -66,10 +76,12 @@ export function createOpenRouterProvider(options: OpenRouterOptions): Provider {
       }
 
       let sawDone = false;
+      const toolCalls = new ToolCallAssembler();
       try {
         for await (const data of readSseData(response.body)) {
           if (data === "[DONE]") {
             sawDone = true;
+            yield* toolCalls.flush();
             break;
           }
 
@@ -92,8 +104,12 @@ export function createOpenRouterProvider(options: OpenRouterOptions): Provider {
             return;
           }
 
-          const text = chunk.choices?.[0]?.delta?.content;
+          const choice = chunk.choices?.[0];
+          const text = choice?.delta?.content;
           if (text) yield { type: "text_delta", text };
+
+          for (const fragment of choice?.delta?.tool_calls ?? []) toolCalls.add(fragment);
+          if (choice?.finish_reason) yield* toolCalls.flush();
 
           if (chunk.usage) {
             yield {
@@ -121,6 +137,46 @@ export function createOpenRouterProvider(options: OpenRouterOptions): Provider {
       yield { type: "done" };
     },
   };
+}
+
+/**
+ * Collects streamed Tool Call fragments by their `index` until the Model finishes,
+ * then emits each completed Tool Call in index order.
+ */
+class ToolCallAssembler {
+  private pending = new Map<number, { id: string; name: string; arguments: string }>();
+
+  add(fragment: WireToolCallDelta) {
+    const call = this.pending.get(fragment.index) ?? { id: "", name: "", arguments: "" };
+    if (fragment.id) call.id = fragment.id;
+    if (fragment.function?.name) call.name = fragment.function.name;
+    call.arguments += fragment.function?.arguments ?? "";
+    this.pending.set(fragment.index, call);
+  }
+
+  *flush(): Generator<ProviderEvent> {
+    const calls = [...this.pending.entries()].sort(([a], [b]) => a - b);
+    this.pending.clear();
+    for (const [, call] of calls) {
+      // Some Models omit the id; every Tool Result must still be matched to its call.
+      const id = call.id || `call_${crypto.randomUUID()}`;
+      yield { type: "tool_call", toolCall: { id, name: call.name, ...parseArguments(call.arguments) } };
+    }
+  }
+}
+
+/**
+ * Tool Call arguments arrive as a JSON string. Empty means no arguments. Text that
+ * isn't valid JSON is kept as `unparsedArguments` so the Agent can report it back
+ * to the Model as an error Tool Result.
+ */
+function parseArguments(raw: string): Pick<ToolCall, "arguments" | "unparsedArguments"> {
+  if (raw.trim() === "") return { arguments: {} };
+  try {
+    return { arguments: JSON.parse(raw) };
+  } catch {
+    return { arguments: null, unparsedArguments: raw };
+  }
 }
 
 /** A failure to send the request or to keep reading its response. */
@@ -207,7 +263,7 @@ function toWireMessage(message: Message): WireMessage {
         tool_calls: message.toolCalls.map((call) => ({
           id: call.id,
           type: "function",
-          function: { name: call.name, arguments: JSON.stringify(call.arguments) },
+          function: { name: call.name, arguments: call.unparsedArguments ?? JSON.stringify(call.arguments) },
         })),
       };
     case "tool_result":

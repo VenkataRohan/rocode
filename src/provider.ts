@@ -1,4 +1,4 @@
-import type { Message, Usage } from "./messages.ts";
+import type { Message, ToolCall, Usage } from "./messages.ts";
 
 /** How a Tool is described to the Model. */
 export type ToolDefinition = {
@@ -26,6 +26,8 @@ export type ProviderError = {
 
 export type ProviderEvent =
   | { type: "text_delta"; text: string }
+  /** A Tool Call whose arguments have fully arrived. */
+  | { type: "tool_call"; toolCall: ToolCall }
   | { type: "usage"; usage: Usage }
   | { type: "done" }
   | { type: "error"; error: ProviderError };

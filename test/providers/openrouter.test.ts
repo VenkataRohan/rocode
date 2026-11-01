@@ -48,6 +48,134 @@ describe("OpenRouter Provider", () => {
     ]);
   });
 
+  describe("Tool Calls", () => {
+    test("argument fragments streamed across many chunks are assembled into one Tool Call", async () => {
+      const { http } = replay(await fixture("tool-call-fragmented.sse"));
+      const provider = createOpenRouterProvider({ apiKey: "sk-test", http });
+
+      const events = await collect(provider.stream(request()));
+
+      expect(events).toEqual([
+        {
+          type: "tool_call",
+          toolCall: {
+            id: "read_t01vmajevxpz",
+            name: "read",
+            arguments: { path: "src/cli.ts", offset: 10, limit: 20 },
+          },
+        },
+        { type: "usage", usage: { inputTokens: 66, outputTokens: 121 } },
+        { type: "done" },
+      ]);
+    });
+
+    test("several Tool Calls in one reply are emitted in the Model's order", async () => {
+      const { http } = replay(await fixture("tool-calls-parallel.sse"));
+      const provider = createOpenRouterProvider({ apiKey: "sk-test", http });
+
+      const events = await collect(provider.stream(request()));
+
+      expect(events).toEqual([
+        {
+          type: "tool_call",
+          toolCall: { id: "call_849522", name: "read", arguments: { path: "package.json" } },
+        },
+        {
+          type: "tool_call",
+          toolCall: { id: "call_849523", name: "read", arguments: { path: "tsconfig.json" } },
+        },
+        { type: "usage", usage: { inputTokens: 80, outputTokens: 32 } },
+        { type: "done" },
+      ]);
+    });
+
+    test("text streamed before a Tool Call comes through first", async () => {
+      const { http } = replay(await fixture("text-then-tool-call.sse"));
+      const provider = createOpenRouterProvider({ apiKey: "sk-test", http });
+
+      const events = await collect(provider.stream(request()));
+
+      const text = events.flatMap((e) => (e.type === "text_delta" ? [e.text] : [])).join("");
+      expect(text).toBe('First, a short sentence: "The quick brown fox jumps over the lazy dog."\n\nNow reading the file:\n');
+      expect(events.slice(-3)).toEqual([
+        {
+          type: "tool_call",
+          toolCall: {
+            id: "call-5473f95b-eef9-48f5-9aa4-c50fe1e6630b",
+            name: "read",
+            arguments: { path: "src/cli.ts", offset: 10, limit: 20 },
+          },
+        },
+        { type: "usage", usage: { inputTokens: 336, outputTokens: 156 } },
+        { type: "done" },
+      ]);
+    });
+
+    const chunk = (delta: object, finish: string | null = null) =>
+      `data: ${JSON.stringify({ choices: [{ index: 0, delta, finish_reason: finish }] })}\n\n`;
+
+    test("arguments that aren't valid JSON are kept as unparsed text", async () => {
+      const sse =
+        chunk({ tool_calls: [{ index: 0, id: "c1", type: "function", function: { name: "read", arguments: "" } }] }) +
+        chunk({ tool_calls: [{ index: 0, function: { arguments: '{"path": "a.txt"' } }] }) +
+        chunk({}, "tool_calls") +
+        "data: [DONE]\n\n";
+      const { http } = replay(sse);
+      const provider = createOpenRouterProvider({ apiKey: "sk-test", http });
+
+      const events = await collect(provider.stream(request()));
+
+      expect(events).toEqual([
+        {
+          type: "tool_call",
+          toolCall: { id: "c1", name: "read", arguments: null, unparsedArguments: '{"path": "a.txt"' },
+        },
+        { type: "done" },
+      ]);
+    });
+
+    test("unparsed arguments are sent back to the Model exactly as it wrote them", async () => {
+      const { http, calls } = replay(await fixture("text-stream.sse"));
+      const provider = createOpenRouterProvider({ apiKey: "sk-test", http });
+
+      await collect(
+        provider.stream(
+          request({
+            messages: [
+              { role: "user", content: "read a.txt" },
+              {
+                role: "assistant",
+                content: "",
+                toolCalls: [{ id: "c1", name: "read", arguments: null, unparsedArguments: '{"path": "a.txt"' }],
+              },
+              { role: "tool_result", toolCallId: "c1", toolName: "read", content: "Invalid arguments", isError: true },
+            ],
+          }),
+        ),
+      );
+
+      const body = JSON.parse(calls[0]!.init.body as string);
+      expect(body.messages[1].tool_calls[0].function.arguments).toBe('{"path": "a.txt"');
+    });
+
+    test("Tool Calls the Model sent without an id get a unique one", async () => {
+      const sse =
+        chunk({ tool_calls: [{ index: 0, type: "function", function: { name: "read", arguments: '{"path":"a"}' } }] }) +
+        chunk({ tool_calls: [{ index: 1, type: "function", function: { name: "read", arguments: '{"path":"b"}' } }] }) +
+        chunk({}, "tool_calls") +
+        "data: [DONE]\n\n";
+      const { http } = replay(sse);
+      const provider = createOpenRouterProvider({ apiKey: "sk-test", http });
+
+      const events = await collect(provider.stream(request()));
+
+      const ids = events.flatMap((e) => (e.type === "tool_call" ? [e.toolCall.id] : []));
+      expect(ids).toHaveLength(2);
+      expect(ids.every((id) => id.length > 0)).toBe(true);
+      expect(new Set(ids).size).toBe(2);
+    });
+  });
+
   test("sends the whole conversation, Tool definitions, and the API key", async () => {
     const { http, calls } = replay(await fixture("text-stream.sse"));
     const provider = createOpenRouterProvider({ apiKey: "sk-test", http });

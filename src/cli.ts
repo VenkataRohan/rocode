@@ -1,8 +1,10 @@
 #!/usr/bin/env bun
 import { ConfigError, loadConfig, type Config } from "./config.ts";
 import type { Provider } from "./provider.ts";
+import { createAgent } from "./agent.ts";
 import { createOpenRouterProvider } from "./providers/openrouter.ts";
 import { runRepl } from "./repl.ts";
+import { readTool } from "./tools/read.ts";
 
 function createProvider(config: Config, env: NodeJS.ProcessEnv): Provider {
   switch (config.provider) {
@@ -22,7 +24,14 @@ function createProvider(config: Config, env: NodeJS.ProcessEnv): Provider {
 try {
   const config = await loadConfig(process.argv.slice(2));
   const provider = createProvider(config, process.env);
-  await runRepl({ provider, model: config.model });
+  const agent = createAgent({
+    provider,
+    model: config.model,
+    tools: [readTool],
+    cwd: process.cwd(),
+    maxSteps: config.maxSteps,
+  });
+  await runRepl({ agent, header: `${provider.name} · ${config.model}` });
 } catch (err) {
   if (err instanceof ConfigError) {
     console.error(`rocode: ${err.message}`);

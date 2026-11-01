@@ -1,22 +1,22 @@
-// Plain readline REPL: reads user messages, streams the Model's reply, prints errors.
-// No Tools yet; the Agent core (issue 02) will take over the Turn logic from here.
+// Plain readline REPL: reads user messages and renders the Agent's events.
+// No agent logic lives here; the Agent core runs the Turn.
 
 import { createInterface } from "node:readline/promises";
-import type { Message } from "./messages.ts";
-import type { Provider } from "./provider.ts";
+import type { Agent, AgentEvent } from "./agent.ts";
 
 const dim = (s: string) => `\x1b[2m${s}\x1b[22m`;
 const red = (s: string) => `\x1b[31m${s}\x1b[39m`;
+const cyan = (s: string) => `\x1b[36m${s}\x1b[39m`;
+const yellow = (s: string) => `\x1b[33m${s}\x1b[39m`;
 
-export async function runRepl(options: { provider: Provider; model: string }) {
-  const { provider, model } = options;
-  const messages: Message[] = [];
+export async function runRepl(options: { agent: Agent; header: string }) {
+  const { agent } = options;
   const rl = createInterface({ input: process.stdin, output: process.stdout });
 
-  console.log(dim(`rocode · ${provider.name} · ${model}`));
+  console.log(dim(`rocode · ${options.header}`));
   console.log(dim("Type a message. Ctrl+D to exit.\n"));
 
-  // The async iterator buffers lines typed (or piped) while a reply is streaming,
+  // The async iterator buffers lines typed (or piped) while a Turn is running,
   // and ends cleanly on EOF (Ctrl+D).
   let closed = false;
   rl.once("close", () => (closed = true));
@@ -33,14 +33,8 @@ export async function runRepl(options: { provider: Provider; model: string }) {
       continue;
     }
 
-    messages.push({ role: "user", content: text });
-    const reply = await runTurn(provider, model, messages);
-    if (reply) {
-      messages.push(reply);
-    } else {
-      // The Turn failed: drop its user Message so the next attempt starts clean.
-      messages.pop();
-    }
+    const renderer = new TurnRenderer();
+    for await (const event of agent.runTurn(text, new AbortController().signal)) renderer.render(event);
     process.stdout.write("\n");
     prompt();
   }
@@ -48,32 +42,64 @@ export async function runRepl(options: { provider: Provider; model: string }) {
   rl.close();
 }
 
-/** Streams one reply to stdout. Returns the assistant Message, or null if the Turn failed. */
-async function runTurn(provider: Provider, model: string, messages: Message[]) {
-  let content = "";
-  const events = provider.stream({
-    messages,
-    tools: [],
-    model,
-    signal: new AbortController().signal,
-  });
+/** Writes one Turn's events to stdout, keeping Model text and Tool activity visually apart. */
+class TurnRenderer {
+  /** Whether the cursor is at the start of a line. */
+  private atLineStart = true;
 
-  for await (const event of events) {
+  render(event: AgentEvent) {
     switch (event.type) {
       case "text_delta":
-        content += event.text;
-        process.stdout.write(event.text);
+        this.write(event.text);
         break;
-      case "usage":
-        break; // shown once usage display lands (issue 08)
-      case "error":
-        if (content) process.stdout.write("\n");
-        console.log(red(`✗ ${event.error.message}`));
-        return null;
-      case "done":
-        process.stdout.write("\n");
-        return { role: "assistant", content, toolCalls: [] } satisfies Message;
+      case "tool_call_started":
+        this.line(cyan(`● ${event.toolCall.name}(${formatArguments(event.toolCall.arguments)})`));
+        break;
+      case "tool_call_finished": {
+        const preview = `  ⎿ ${truncate(event.preview.replaceAll("\t", " "), 100)}`;
+        this.line(event.isError ? red(preview) : dim(preview));
+        break;
+      }
+      case "step_finished":
+        break;
+      case "turn_finished":
+        if (event.reason === "step_limit") {
+          this.line(yellow("⚠ Stopped: this Turn hit the Step limit. The task may be incomplete; say \"continue\" to keep going."));
+        } else if (event.reason === "error") {
+          this.line(red(`✗ ${event.error?.message ?? "The Turn failed."}`));
+        } else {
+          this.endLine();
+        }
+        break;
     }
   }
-  return null;
+
+  private write(text: string) {
+    if (!text) return;
+    process.stdout.write(text);
+    this.atLineStart = text.endsWith("\n");
+  }
+
+  private endLine() {
+    if (!this.atLineStart) this.write("\n");
+  }
+
+  private line(text: string) {
+    this.endLine();
+    this.write(`${text}\n`);
+  }
+}
+
+/** Tool Call arguments as `key: value` pairs, each value shortened. */
+function formatArguments(args: unknown): string {
+  if (typeof args !== "object" || args === null || Array.isArray(args)) {
+    return truncate(typeof args === "string" ? args : JSON.stringify(args), 80);
+  }
+  return Object.entries(args)
+    .map(([key, value]) => `${key}: ${truncate(JSON.stringify(value), 60)}`)
+    .join(", ");
+}
+
+function truncate(text: string, max: number): string {
+  return text.length <= max ? text : `${text.slice(0, max - 1)}…`;
 }
