@@ -1,0 +1,6 @@
+: OPENROUTER PROCESSING
+
+data: {"id":"gen-1793515500-def","provider":"Google AI Studio","model":"google/gemma-4-31b-it:free","object":"chat.completion.chunk","created":1793515500,"choices":[{"index":0,"delta":{"role":"assistant","content":"Partial"},"finish_reason":null,"native_finish_reason":null,"logprobs":null}]}
+
+data: {"id":"gen-1793515500-def","object":"chat.completion.chunk","created":1793515500,"model":"google/gemma-4-31b-it:free","provider":"Google AI Studio","error":{"code":"server_error","message":"Provider disconnected unexpectedly"},"choices":[{"index":0,"delta":{"content":""},"finish_reason":"error"}]}
+
