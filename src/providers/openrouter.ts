@@ -65,9 +65,13 @@ export function createOpenRouterProvider(options: OpenRouterOptions): Provider {
         return;
       }
 
+      let sawDone = false;
       try {
         for await (const data of readSseData(response.body)) {
-          if (data === "[DONE]") break;
+          if (data === "[DONE]") {
+            sawDone = true;
+            break;
+          }
 
           let chunk: WireChunk;
           try {
@@ -106,6 +110,14 @@ export function createOpenRouterProvider(options: OpenRouterOptions): Provider {
         return;
       }
 
+      if (!sawDone) {
+        // The connection closed cleanly but early: the reply is incomplete.
+        yield {
+          type: "error",
+          error: { kind: "network", message: "OpenRouter closed the stream before the reply finished." },
+        };
+        return;
+      }
       yield { type: "done" };
     },
   };
@@ -133,7 +145,7 @@ async function httpError(response: Response, model: string): Promise<ProviderErr
     return {
       kind: "rate_limit",
       status,
-      message: `OpenRouter rate limit hit (429: ${detail.trim()}). Free Models are capped per minute and per day; wait a bit or switch Models.`,
+      message: `OpenRouter rate limit hit (429: ${detail}). Free Models are capped per minute and per day; wait a bit or switch Models.`,
     };
   }
   // OpenRouter answers 400 "... is not a valid model ID" for unknown ids,
@@ -160,7 +172,8 @@ async function errorDetail(response: Response): Promise<string> {
   const text = await response.text().catch(() => "");
   try {
     const body = JSON.parse(text) as { error?: { message?: string } };
-    if (body.error?.message) return body.error.message;
+    const message = body.error?.message?.trim();
+    if (message) return message;
   } catch {
     // not JSON; fall through to raw text
   }

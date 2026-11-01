@@ -38,7 +38,7 @@ export type StreamRequest = {
 };
 
 /**
- * A backend serving Models through a specific wire format.
+ * A Provider serves Models through a specific wire format.
  * `stream` never throws: failures arrive as a final `error` event,
  * success ends with a `done` event.
  */

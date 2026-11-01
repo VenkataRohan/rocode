@@ -10,7 +10,12 @@ export type Config = {
   model: string;
 };
 
-export const DEFAULTS: Config = {
+const CONFIG_KEYS = ["provider", "model"] as const satisfies readonly (keyof Config)[];
+
+/** Unvalidated string values from the config file or CLI flags. */
+type RawConfig = Partial<Record<(typeof CONFIG_KEYS)[number], string>>;
+
+const DEFAULTS: Config = {
   provider: "openrouter",
   model: "google/gemma-4-31b-it:free",
 };
@@ -33,24 +38,23 @@ export async function loadConfig(
   return { provider: checkProvider(merged.provider), model: merged.model };
 }
 
-function parseFlags(argv: string[]): Partial<Record<keyof Config, string>> {
+function parseFlags(argv: string[]): RawConfig {
   try {
     const { values } = parseArgs({
       args: argv,
-      options: {
-        provider: { type: "string" },
-        model: { type: "string" },
-      },
+      options: Object.fromEntries(CONFIG_KEYS.map((key) => [key, { type: "string" as const }])),
       strict: true,
       allowPositionals: false,
     });
-    return dropUndefined(values);
+    return Object.fromEntries(
+      Object.entries(values).filter(([, v]) => typeof v === "string"),
+    ) as RawConfig;
   } catch (err) {
     throw new ConfigError(`${(err as Error).message}\nUsage: rocode [--provider <name>] [--model <id>]`);
   }
 }
 
-async function readConfigFile(path: string): Promise<Partial<Record<keyof Config, string>>> {
+async function readConfigFile(path: string): Promise<RawConfig> {
   const file = Bun.file(path);
   if (!(await file.exists())) return {};
 
@@ -64,8 +68,8 @@ async function readConfigFile(path: string): Promise<Partial<Record<keyof Config
     throw new ConfigError(`${path} must contain a JSON object.`);
   }
 
-  const out: Partial<Record<keyof Config, string>> = {};
-  for (const key of ["provider", "model"] as const) {
+  const out: RawConfig = {};
+  for (const key of CONFIG_KEYS) {
     const value = (raw as Record<string, unknown>)[key];
     if (value === undefined) continue;
     if (typeof value !== "string" || value === "") {
@@ -79,10 +83,4 @@ async function readConfigFile(path: string): Promise<Partial<Record<keyof Config
 function checkProvider(name: string): ProviderName {
   if ((PROVIDERS as readonly string[]).includes(name)) return name as ProviderName;
   throw new ConfigError(`Unknown provider "${name}". Available: ${PROVIDERS.join(", ")}.`);
-}
-
-function dropUndefined<T extends Record<string, unknown>>(obj: T) {
-  return Object.fromEntries(Object.entries(obj).filter(([, v]) => v !== undefined)) as {
-    [K in keyof T]?: Exclude<T[K], undefined>;
-  };
 }

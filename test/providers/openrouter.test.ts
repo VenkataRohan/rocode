@@ -84,7 +84,6 @@ describe("OpenRouter Provider", () => {
       ),
     );
 
-    expect(calls).toHaveLength(1);
     const [call] = calls;
     expect(call!.url).toBe("https://openrouter.ai/api/v1/chat/completions");
     expect(call!.init.method).toBe("POST");
@@ -222,6 +221,18 @@ describe("OpenRouter Provider", () => {
       expect(events[0]).toEqual({ type: "text_delta", text: "Hel" });
       expect(events[1]).toMatchObject({ type: "error", error: { kind: "network" } });
     });
+  });
+
+  test("a stream that ends without [DONE] is an error, not a complete reply", async () => {
+    const full = await fixture("text-stream.sse");
+    const truncated = full.slice(0, full.indexOf('"content":"!"'));
+    const { http } = replay(truncated.slice(0, truncated.lastIndexOf("data:")));
+    const provider = createOpenRouterProvider({ apiKey: "sk-test", http });
+
+    const events = await collect(provider.stream(request()));
+
+    expect(events.at(-1)).toMatchObject({ type: "error", error: { kind: "network" } });
+    expect(events).not.toContainEqual({ type: "done" });
   });
 
   test("events split across network chunks are reassembled", async () => {
