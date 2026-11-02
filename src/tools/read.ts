@@ -1,5 +1,6 @@
-import { readFile, stat } from "node:fs/promises";
+import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
+import { statOrNull } from "./files.ts";
 import { errorResult as error, okResult as ok, type Tool } from "./tool.ts";
 
 type ReadArgs = { path: string; offset?: number; limit?: number };
@@ -23,10 +24,7 @@ export const readTool: Tool<ReadArgs> = {
   async execute({ path, offset = 1, limit }, { cwd }) {
     const fullPath = resolve(cwd, path);
 
-    const info = await stat(fullPath).catch((err: NodeJS.ErrnoException) => {
-      if (err.code === "ENOENT") return null;
-      throw err;
-    });
+    const info = await statOrNull(fullPath);
     if (!info) return error(`File not found: ${path}`);
     if (info.isDirectory()) return error(`${path} is a directory, not a file.`);
 

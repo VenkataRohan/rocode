@@ -5,7 +5,9 @@ import { approveAll, createAgent } from "./agent.ts";
 import { createOpenRouterProvider } from "./providers/openrouter.ts";
 import { runRepl } from "./repl.ts";
 import { createBashTool } from "./tools/bash.ts";
+import { editTool } from "./tools/edit.ts";
 import { readTool } from "./tools/read.ts";
+import { writeTool } from "./tools/write.ts";
 
 function createProvider(config: Config, env: NodeJS.ProcessEnv): Provider {
   switch (config.provider) {
@@ -25,7 +27,7 @@ function createProvider(config: Config, env: NodeJS.ProcessEnv): Provider {
 try {
   const config = await loadConfig(process.argv.slice(2));
   const provider = createProvider(config, process.env);
-  const tools = [readTool, createBashTool({ timeoutMs: config.bashTimeoutSeconds * 1000 })];
+  const tools = [readTool, writeTool, editTool, createBashTool({ timeoutMs: config.bashTimeoutSeconds * 1000 })];
   await runRepl({
     createAgent: (askUser) =>
       createAgent({

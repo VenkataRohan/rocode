@@ -13,6 +13,8 @@ import {
 } from "../src/agent.ts";
 import { readTool } from "../src/tools/read.ts";
 import { createBashTool } from "../src/tools/bash.ts";
+import { writeTool } from "../src/tools/write.ts";
+import { editTool } from "../src/tools/edit.ts";
 import type { ToolCall } from "../src/messages.ts";
 import type { Tool } from "../src/tools/tool.ts";
 import { call, callTools, FakeProvider, reply, type ScriptedStep } from "./support/fake-provider.ts";
@@ -428,6 +430,139 @@ describe("Agent", () => {
     });
   });
 
+  describe("write", () => {
+    const write = (args: unknown) => toolResultFor(call("c1", "write", args), { tools: [writeTool] });
+
+    test("creates a file, and any missing parent directories", async () => {
+      const result = await write({ path: "src/deep/new.ts", content: "export const x = 1;\n" });
+
+      expect(result).toMatchObject({ isError: false, content: "Created src/deep/new.ts (1 line)." });
+      expect(await readFile(join(cwd, "src/deep/new.ts"), "utf8")).toBe("export const x = 1;\n");
+    });
+
+    test("overwrites an existing file", async () => {
+      await writeFile(join(cwd, "a.txt"), "old\nold\nold\n");
+
+      const result = await write({ path: "a.txt", content: "new\nnew\n" });
+
+      expect(result).toMatchObject({ isError: false, content: "Overwrote a.txt (2 lines)." });
+      expect(await readFile(join(cwd, "a.txt"), "utf8")).toBe("new\nnew\n");
+    });
+
+    test("a path that is a directory is an error", async () => {
+      await mkdir(join(cwd, "src"));
+
+      const result = await write({ path: "src", content: "x" });
+
+      expect(result).toMatchObject({ isError: true, content: "src is a directory, not a file." });
+    });
+  });
+
+  describe("edit", () => {
+    const edit = (args: unknown) => toolResultFor(call("c1", "edit", args), { tools: [editTool] });
+    const source = "function add(a, b) {\n  return a - b;\n}\n";
+
+    beforeEach(async () => {
+      await writeFile(join(cwd, "math.js"), source);
+    });
+
+    test("replaces the one occurrence of the old string with the new string", async () => {
+      const result = await edit({ path: "math.js", old_string: "return a - b;", new_string: "return a + b;" });
+
+      expect(result).toMatchObject({ isError: false, content: "Edited math.js." });
+      expect(await readFile(join(cwd, "math.js"), "utf8")).toBe("function add(a, b) {\n  return a + b;\n}\n");
+    });
+
+    test("an old string that isn't in the file tells the Model to re-read it, and changes nothing", async () => {
+      const result = await edit({ path: "math.js", old_string: "return a-b;", new_string: "return a + b;" });
+
+      expect(result).toMatchObject({
+        isError: true,
+        content:
+          "old_string was not found in math.js. It must match the file exactly, including whitespace and indentation. " +
+          "Re-read the file with read, then retry with the exact text.",
+      });
+      expect(await readFile(join(cwd, "math.js"), "utf8")).toBe(source);
+    });
+
+    test("an old string that occurs more than once asks for more context, and changes nothing", async () => {
+      const twice = "let a = 0;\nlet b = 0;\nlet c = 1;\nlet d = 0;\n";
+      await writeFile(join(cwd, "vars.js"), twice);
+
+      const result = await edit({ path: "vars.js", old_string: " = 0;", new_string: " = 2;" });
+
+      expect(result).toMatchObject({
+        isError: true,
+        content:
+          "old_string matched 3 times in vars.js (lines 1, 2, 4) — add more surrounding context so it matches exactly once.",
+      });
+      expect(await readFile(join(cwd, "vars.js"), "utf8")).toBe(twice);
+    });
+
+    test("the Model recovers from a not-found edit by re-reading the file and retrying", async () => {
+      const guess = call("c1", "edit", { path: "math.js", old_string: "return a-b;", new_string: "return a + b;" });
+      const reread = call("c2", "read", { path: "math.js" });
+      const retry = call("c3", "edit", { path: "math.js", old_string: "  return a - b;", new_string: "  return a + b;" });
+      const { agent, provider } = setup(
+        [callTools([guess]), callTools([reread]), callTools([retry]), reply("Fixed the subtraction.")],
+        { tools: [readTool, editTool] },
+      );
+
+      const events = await runTurn(agent, "add() subtracts; fix it");
+
+      expect(events.at(-1)).toEqual({ type: "turn_finished", reason: "completed" });
+      const results = agent.messages.filter((m) => m.role === "tool_result");
+      expect(results.map((r) => [r.toolCallId, r.isError])).toEqual([
+        ["c1", true],
+        ["c2", false],
+        ["c3", false],
+      ]);
+      // The Model saw the not-found hint before it chose to re-read.
+      expect(provider.requests[1]!.at(-1)).toMatchObject({ toolCallId: "c1", content: expect.stringContaining("Re-read") });
+      expect(await readFile(join(cwd, "math.js"), "utf8")).toBe("function add(a, b) {\n  return a + b;\n}\n");
+    });
+
+    test("overlapping occurrences count as more than one match", async () => {
+      await writeFile(join(cwd, "a.txt"), "aaa");
+
+      const result = await edit({ path: "a.txt", old_string: "aa", new_string: "b" });
+
+      expect(result.content).toStartWith("old_string matched 2 times in a.txt (lines 1, 1)");
+      expect(await readFile(join(cwd, "a.txt"), "utf8")).toBe("aaa");
+    });
+
+    test("a CRLF file matches multi-line text as read shows it, and keeps its CRLF line endings", async () => {
+      await writeFile(join(cwd, "win.js"), "function add(a, b) {\r\n  return a - b;\r\n}\r\n");
+
+      const result = await edit({
+        path: "win.js",
+        old_string: "function add(a, b) {\n  return a - b;",
+        new_string: "function add(a, b) {\n  // fixed\n  return a + b;",
+      });
+
+      expect(result).toMatchObject({ isError: false });
+      expect(await readFile(join(cwd, "win.js"), "utf8")).toBe(
+        "function add(a, b) {\r\n  // fixed\r\n  return a + b;\r\n}\r\n",
+      );
+    });
+
+    test("an empty old string is rejected, pointing at write", async () => {
+      const result = await edit({ path: "math.js", old_string: "", new_string: "x" });
+
+      expect(result).toMatchObject({
+        isError: true,
+        content: "old_string must not be empty. To create a file or replace all of its content, use write.",
+      });
+      expect(await readFile(join(cwd, "math.js"), "utf8")).toBe(source);
+    });
+
+    test("a missing file is an error that suggests write", async () => {
+      const result = await edit({ path: "nope.js", old_string: "a", new_string: "b" });
+
+      expect(result).toMatchObject({ isError: true, content: "File not found: nope.js. To create a file, use write." });
+    });
+  });
+
   describe("Approvals", () => {
     const logged = () => readFile(join(cwd, "log.txt"), "utf8").catch(() => "");
 
@@ -524,6 +659,20 @@ describe("Agent", () => {
       await toolResultFor(call("c1", "bash", { command }), { tools: [createBashTool()], approve });
 
       expect(requests.map((r) => r.subject)).toEqual([command]);
+    });
+
+    test.each([
+      ["write", writeTool, { path: "src/a.ts", content: "b\n".repeat(500) }],
+      ["edit", editTool, { path: "src/a.ts", old_string: "a", new_string: "b" }],
+    ])("%s asks with the target path, and a denial leaves the file alone", async (name, tool, args) => {
+      await mkdir(join(cwd, "src"));
+      await writeFile(join(cwd, "src/a.ts"), "a\n");
+      const { approve, requests } = scriptedApprovals("deny");
+
+      await toolResultFor(call("c1", name, args), { tools: [tool], approve });
+
+      expect(requests.map((r) => r.subject)).toEqual(["src/a.ts"]);
+      expect(await readFile(join(cwd, "src/a.ts"), "utf8")).toBe("a\n");
     });
 
     test("yolo approves every Tool Call without asking the user", async () => {
