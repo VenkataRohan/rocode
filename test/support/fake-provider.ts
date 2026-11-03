@@ -1,8 +1,11 @@
 import type { Message, ToolCall } from "../../src/messages.ts";
 import type { Provider, ProviderEvent, StreamRequest } from "../../src/provider.ts";
 
+/** Stands in for a stream that stalls until the request is aborted, then fails like a real Provider does. */
+export const HANG = Symbol("hang");
+
 /** One scripted Model reply: the events a Provider would emit for a single Step. */
-export type ScriptedStep = ProviderEvent[];
+export type ScriptedStep = (ProviderEvent | typeof HANG)[];
 
 /**
  * A Provider that replays scripted Steps in order, one per `stream` call.
@@ -12,6 +15,8 @@ export class FakeProvider implements Provider {
   readonly name = "fake";
   /** Snapshots of the Messages each request carried, for asserting what the Model saw. */
   readonly requests: Message[][] = [];
+  /** Whether each request's abort signal had fired by the time its stream ended. */
+  readonly aborted: boolean[] = [];
   private steps: ScriptedStep[];
 
   constructor(steps: ScriptedStep[]) {
@@ -25,7 +30,20 @@ export class FakeProvider implements Provider {
       yield { type: "error", error: { kind: "server", message: "FakeProvider: no more scripted Steps" } };
       return;
     }
-    yield* step;
+    const index = this.requests.length - 1;
+    try {
+      for (const event of step) {
+        if (event !== HANG) {
+          yield event;
+          continue;
+        }
+        await waitForAbort(request.signal);
+        yield { type: "error", error: { kind: "aborted", message: "Request cancelled." } };
+        return;
+      }
+    } finally {
+      this.aborted[index] = request.signal.aborted;
+    }
   }
 }
 
@@ -45,4 +63,9 @@ export function callTools(calls: ToolCall[], text?: string): ScriptedStep {
 
 export function call(id: string, name: string, args: unknown): ToolCall {
   return { id, name, arguments: args };
+}
+
+function waitForAbort(signal: AbortSignal): Promise<void> {
+  if (signal.aborted) return Promise.resolve();
+  return new Promise((resolve) => signal.addEventListener("abort", () => resolve(), { once: true }));
 }

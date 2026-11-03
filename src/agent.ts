@@ -8,6 +8,7 @@ import { createToolRegistry, errorResult, type Tool, type ToolResult } from "./t
 export type TurnFinishReason =
   | "completed" // the Model replied without Tool Calls
   | "step_limit" // maxSteps Steps ran and the Model still wanted Tools
+  | "interrupted" // the user interrupted the Turn (Ctrl+C)
   | "error"; // the Provider failed
 
 export type AgentEvent =
@@ -73,10 +74,27 @@ export function createAgent(options: AgentOptions): Agent {
       yield { type: "approval_requested", toolCall, subject };
       const decision = await approve({ toolCall, subject }, signal);
       yield { type: "approval_resolved", toolCall, decision };
+      if (signal.aborted) return errorResult(CANCELLED);
       if (decision === "deny") return errorResult(denied(tool.name));
       if (decision === "always") alwaysAllowed.add(tool.name);
     }
     return prepared.run({ cwd, signal });
+  }
+
+  /**
+   * Marks the Turn's last reply (already recorded) as interrupted, and gives each of its Tool Calls
+   * that has no Tool Result yet a cancelled one, so every call is answered as every Provider requires.
+   */
+  function finishInterrupted(reply: AssistantMessage): AgentEvent {
+    reply.interrupted = true;
+    const answered = new Set(
+      messages.slice(messages.indexOf(reply)).flatMap((m) => (m.role === "tool_result" ? [m.toolCallId] : [])),
+    );
+    for (const toolCall of reply.toolCalls) {
+      if (answered.has(toolCall.id)) continue;
+      messages.push({ role: "tool_result", toolCallId: toolCall.id, toolName: toolCall.name, content: CANCELLED, isError: true });
+    }
+    return { type: "turn_finished", reason: "interrupted" };
   }
 
   async function* runTurn(text: string, signal: AbortSignal): AsyncGenerator<AgentEvent> {
@@ -94,6 +112,11 @@ export function createAgent(options: AgentOptions): Agent {
             reply.toolCalls.push(event.toolCall);
             break;
           case "error":
+            if (signal.aborted) {
+              messages.push(reply);
+              yield finishInterrupted(reply);
+              return;
+            }
             // Discard the failed Step's partial reply. If no Step completed, drop the
             // user Message too, so retrying doesn't send it twice.
             if (step === 1) messages.pop();
@@ -104,6 +127,7 @@ export function createAgent(options: AgentOptions): Agent {
       messages.push(reply);
 
       for (const toolCall of reply.toolCalls) {
+        if (signal.aborted) break;
         yield { type: "tool_call_started", toolCall };
         const result = yield* approveAndRun(toolCall, signal);
         messages.push({
@@ -114,6 +138,11 @@ export function createAgent(options: AgentOptions): Agent {
           isError: result.isError,
         });
         yield { type: "tool_call_finished", toolCall, isError: result.isError, preview: preview(result.content) };
+      }
+
+      if (signal.aborted) {
+        yield finishInterrupted(reply);
+        return;
       }
 
       yield { type: "step_finished", step };
@@ -130,6 +159,8 @@ export function createAgent(options: AgentOptions): Agent {
 
   return { messages, runTurn };
 }
+
+const CANCELLED = "Cancelled by the user: the Turn was interrupted before this tool call ran.";
 
 function denied(toolName: string): string {
   return `The user denied this ${toolName} call, so it did not run. Try a different approach, or ask the user how to proceed.`;

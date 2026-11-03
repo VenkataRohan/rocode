@@ -251,21 +251,28 @@ function toWireRequest(request: StreamRequest) {
   };
 }
 
+const INTERRUPTED_NOTE = "[Interrupted by the user]";
+
 function toWireMessage(message: Message): WireMessage {
   switch (message.role) {
     case "user":
       return { role: "user", content: message.content };
-    case "assistant":
-      if (message.toolCalls.length === 0) return { role: "assistant", content: message.content };
+    case "assistant": {
+      // The wire format has no interrupted flag, so tell the Model in the text itself.
+      const content = message.interrupted
+        ? [message.content, INTERRUPTED_NOTE].filter(Boolean).join("\n\n")
+        : message.content;
+      if (message.toolCalls.length === 0) return { role: "assistant", content };
       return {
         role: "assistant",
-        content: message.content || null,
+        content: content || null,
         tool_calls: message.toolCalls.map((call) => ({
           id: call.id,
           type: "function",
           function: { name: call.name, arguments: call.unparsedArguments ?? JSON.stringify(call.arguments) },
         })),
       };
+    }
     case "tool_result":
       return { role: "tool", tool_call_id: message.toolCallId, content: message.content };
   }

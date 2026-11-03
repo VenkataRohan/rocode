@@ -17,33 +17,58 @@ export async function runRepl(options: {
   const rl = createInterface({ input: process.stdin, output: process.stdout });
   const lines = new LineQueue(rl);
   const renderer = new EventRenderer();
-  const agent = options.createAgent((request) => askForApproval(request, rl, lines, renderer));
+  const agent = options.createAgent((request, signal) => askForApproval(request, signal, rl, lines, renderer));
+
+  /** Set while a Turn runs: Ctrl+C interrupts it. At an idle prompt, Ctrl+C exits. */
+  let turn: AbortController | undefined;
+  const onCtrlC = () => {
+    if (!turn) rl.close();
+    else if (!turn.signal.aborted) turn.abort();
+    else process.exit(130); // a second Ctrl+C: the Turn didn't stop, so don't trap the user
+  };
+  rl.on("SIGINT", onCtrlC); // at a terminal, readline sees Ctrl+C as a keypress
+  process.on("SIGINT", onCtrlC); // otherwise it arrives as a signal
 
   console.log(dim(`rocode · ${options.header}`));
-  console.log(dim("Type a message. Ctrl+D to exit.\n"));
+  console.log(dim("Type a message. Ctrl+C interrupts a Turn; Ctrl+C or Ctrl+D at the prompt exits.\n"));
 
   rl.setPrompt(MESSAGE_PROMPT);
-  while (true) {
-    if (!lines.closed) rl.prompt();
-    const line = await lines.next();
-    if (line === null) break;
-    const text = line.trim();
-    if (!text) continue;
-
-    for await (const event of agent.runTurn(text, new AbortController().signal)) renderer.render(event);
-    renderer.write("\n");
+  try {
+    await chat();
+  } finally {
+    process.off("SIGINT", onCtrlC);
+    rl.close();
   }
 
-  rl.close();
+  async function chat() {
+    while (true) {
+      if (!lines.closed) rl.prompt();
+      const line = await lines.next();
+      if (line === null) break;
+      const text = line.trim();
+      if (!text) continue;
+
+      turn = new AbortController();
+      try {
+        for await (const event of agent.runTurn(text, turn.signal)) renderer.render(event);
+      } finally {
+        // Lines typed while a runaway Turn was being stopped weren't written for what comes next.
+        if (turn.signal.aborted && process.stdin.isTTY) lines.discardBuffered();
+        turn = undefined;
+      }
+      renderer.write("\n");
+    }
+  }
 }
 
 const MESSAGE_PROMPT = "> ";
 
 const ANSWERS: Record<string, ApprovalDecision> = { y: "once", yes: "once", n: "deny", no: "deny", a: "always", always: "always" };
 
-/** Shows what a Tool Call will do and asks y / n / a until it gets a valid answer. Ctrl+D (end of input) denies. */
+/** Shows what a Tool Call will do and asks y / n / a until it gets a valid answer. Ctrl+D (end of input) or Ctrl+C denies. */
 async function askForApproval(
   { toolCall, subject }: ApprovalRequest,
+  signal: AbortSignal,
   rl: Interface,
   lines: LineQueue,
   renderer: EventRenderer,
@@ -63,7 +88,11 @@ async function askForApproval(
   try {
     while (true) {
       if (!lines.closed) rl.prompt();
-      const answer = await lines.next();
+      const answer = await lines.next(signal);
+      if (signal.aborted) {
+        renderer.line(dim("(interrupted: denied)"));
+        return "deny";
+      }
       if (answer === null) {
         renderer.line(dim("(end of input: denied)"));
         return "deny";
@@ -110,12 +139,24 @@ class LineQueue {
     return this.ended;
   }
 
-  /** The next line, or null once input has ended and every line was taken. */
-  next(): Promise<string | null> {
+  /** The next line, or null once input has ended and every line was taken, or once `signal` aborts. */
+  next(signal?: AbortSignal): Promise<string | null> {
+    if (signal?.aborted) return Promise.resolve(null);
     const line = this.buffered.shift();
     if (line !== undefined) return Promise.resolve(line);
     if (this.ended) return Promise.resolve(null);
-    return new Promise((resolve) => (this.waiting = resolve));
+    return new Promise((resolve) => {
+      const onAbort = () => {
+        if (this.waiting === settle) this.waiting = undefined;
+        resolve(null);
+      };
+      const settle = (line: string | null) => {
+        signal?.removeEventListener("abort", onAbort);
+        resolve(line);
+      };
+      this.waiting = settle;
+      signal?.addEventListener("abort", onAbort, { once: true });
+    });
   }
 
   private take() {
@@ -153,6 +194,8 @@ class EventRenderer {
       case "turn_finished":
         if (event.reason === "step_limit") {
           this.line(yellow("⚠ Stopped: this Turn hit the Step limit. The task may be incomplete; say \"continue\" to keep going."));
+        } else if (event.reason === "interrupted") {
+          this.line(yellow("⏹ Interrupted. What you've seen so far is kept; tell the Model what to do instead."));
         } else if (event.reason === "error") {
           this.line(red(`✗ ${event.error?.message ?? "The Turn failed."}`));
         } else {

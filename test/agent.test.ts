@@ -17,7 +17,9 @@ import { writeTool } from "../src/tools/write.ts";
 import { editTool } from "../src/tools/edit.ts";
 import type { ToolCall } from "../src/messages.ts";
 import type { Tool } from "../src/tools/tool.ts";
-import { call, callTools, FakeProvider, reply, type ScriptedStep } from "./support/fake-provider.ts";
+import { call, callTools, FakeProvider, HANG, reply, type ScriptedStep } from "./support/fake-provider.ts";
+
+const CANCELLED = "Cancelled by the user: the Turn was interrupted before this tool call ran.";
 
 let cwd: string;
 beforeEach(async () => {
@@ -26,6 +28,19 @@ beforeEach(async () => {
 afterEach(async () => {
   await rm(cwd, { recursive: true, force: true });
 });
+
+/** Starts a long-lived background process and records its pid, to check later that it was killed. */
+const BACKGROUND_SLEEP = "sleep 30 & echo $! > bg.pid";
+async function backgroundProcessAlive() {
+  const pid = Number(await readFile(join(cwd, "bg.pid"), "utf8"));
+  await Bun.sleep(50); // let the kernel reap it
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
 
 function setup(steps: ScriptedStep[], options: Partial<AgentOptions> = {}) {
   const provider = new FakeProvider(steps);
@@ -339,19 +354,6 @@ describe("Agent", () => {
     const bash = (command: string, options: { timeoutMs?: number } = {}) =>
       toolResultFor(call("c1", "bash", { command }), { tools: [createBashTool(options)] });
 
-    /** Starts a long-lived background process and records its pid, to check later that it was killed. */
-    const BACKGROUND_SLEEP = "sleep 30 & echo $! > bg.pid";
-    async function backgroundProcessAlive() {
-      const pid = Number(await readFile(join(cwd, "bg.pid"), "utf8"));
-      await Bun.sleep(50); // let the kernel reap it
-      try {
-        process.kill(pid, 0);
-        return true;
-      } catch {
-        return false;
-      }
-    }
-
     test("runs in the working directory and returns combined output with the exit code", async () => {
       await writeFile(join(cwd, "hello.txt"), "hi\n");
 
@@ -408,25 +410,6 @@ describe("Agent", () => {
 
       expect(Date.now() - started).toBeLessThan(2000);
       expect(result.isError).toBe(true);
-    });
-
-    test("interrupting the Turn kills the running command", async () => {
-      const { agent } = setup(
-        [callTools([call("c1", "bash", { command: `echo started; ${BACKGROUND_SLEEP}; wait` })]), reply("ok")],
-        { tools: [createBashTool()] },
-      );
-      const controller = new AbortController();
-      setTimeout(() => controller.abort(), 100);
-      const started = Date.now();
-
-      for await (const _ of agent.runTurn("go", controller.signal));
-
-      expect(Date.now() - started).toBeLessThan(2000);
-      expect(agent.messages.find((m) => m.role === "tool_result")).toMatchObject({
-        isError: true,
-        content: "started\n\n(Command was interrupted and killed.)",
-      });
-      expect(await backgroundProcessAlive()).toBe(false);
     });
   });
 
@@ -683,6 +666,119 @@ describe("Agent", () => {
 
       expect(result).toMatchObject({ isError: false });
       expect(await readFile(join(cwd, "out.txt"), "utf8")).toBe("hi\n");
+    });
+  });
+
+  describe("Interrupts", () => {
+    /** Runs a Turn, letting `onEvent` decide when to interrupt it (like the user pressing Ctrl+C). */
+    async function interruptedTurn(
+      agent: ReturnType<typeof createAgent>,
+      onEvent: (event: AgentEvent, abort: () => void) => void,
+    ) {
+      const controller = new AbortController();
+      const events: AgentEvent[] = [];
+      for await (const event of agent.runTurn("go", controller.signal)) {
+        events.push(event);
+        onEvent(event, () => controller.abort());
+      }
+      return events;
+    }
+
+    test("interrupting mid-stream cancels the stream and keeps the partial reply, marked interrupted", async () => {
+      const { agent, provider } = setup([[{ type: "text_delta", text: "Let me" }, HANG]]);
+
+      const events = await interruptedTurn(agent, (e, abort) => e.type === "text_delta" && abort());
+
+      expect(events).toEqual([
+        { type: "text_delta", text: "Let me" },
+        { type: "turn_finished", reason: "interrupted" },
+      ]);
+      expect(provider.aborted).toEqual([true]);
+      expect(agent.messages).toEqual([
+        { role: "user", content: "go" },
+        { role: "assistant", content: "Let me", toolCalls: [], interrupted: true },
+      ]);
+    });
+
+    test("Tool Calls in a reply cut off mid-stream never run, and get a cancelled Tool Result", async () => {
+      const logA = call("c1", "log", { label: "a" });
+      const { agent, provider } = setup([[{ type: "tool_call", toolCall: logA }, { type: "text_delta", text: "and" }, HANG]], {
+        tools: [logTool],
+      });
+
+      const events = await interruptedTurn(agent, (e, abort) => e.type === "text_delta" && abort());
+
+      expect(events.at(-1)).toEqual({ type: "turn_finished", reason: "interrupted" });
+      expect(agent.messages).toEqual([
+        { role: "user", content: "go" },
+        { role: "assistant", content: "and", toolCalls: [logA], interrupted: true },
+        { role: "tool_result", toolCallId: "c1", toolName: "log", content: CANCELLED, isError: true },
+      ]);
+      expect(await Bun.file(join(cwd, "log.txt")).exists()).toBe(false);
+      expect(provider.requests).toHaveLength(1);
+    });
+
+    test("interrupting mid-bash kills the command, cancels the Tool Calls after it, and ends the Turn", async () => {
+      const bash = call("c1", "bash", { command: `echo started; ${BACKGROUND_SLEEP}; wait` });
+      const logA = call("c2", "log", { label: "a" });
+      const { agent, provider } = setup([callTools([bash, logA]), reply("never sent")], {
+        tools: [createBashTool(), logTool],
+      });
+      const started = Date.now();
+
+      const events = await interruptedTurn(agent, (e, abort) => {
+        if (e.type === "tool_call_started" && e.toolCall.id === "c1") setTimeout(abort, 100);
+      });
+
+      expect(Date.now() - started).toBeLessThan(2000);
+      expect(events.at(-1)).toEqual({ type: "turn_finished", reason: "interrupted" });
+      expect(agent.messages.slice(1)).toEqual([
+        { role: "assistant", content: "", toolCalls: [bash, logA], interrupted: true },
+        {
+          role: "tool_result",
+          toolCallId: "c1",
+          toolName: "bash",
+          content: "started\n\n(Command was interrupted and killed.)",
+          isError: true,
+        },
+        { role: "tool_result", toolCallId: "c2", toolName: "log", content: CANCELLED, isError: true },
+      ]);
+      expect(await backgroundProcessAlive()).toBe(false);
+      expect(await Bun.file(join(cwd, "log.txt")).exists()).toBe(false);
+      expect(provider.requests).toHaveLength(1);
+    });
+
+    test("interrupting during an Approval prompt denies the call and interrupts the Turn", async () => {
+      const guarded = call("c1", "guarded_log", { label: "a" });
+      /** Like the REPL: waits for an answer that never comes, and denies once the Turn is interrupted. */
+      const waitForCtrlC: ApprovalHandler = (_, signal) =>
+        new Promise((resolve) => {
+          if (signal.aborted) resolve("deny");
+          signal.addEventListener("abort", () => resolve("deny"), { once: true });
+        });
+      const { agent, provider } = setup([callTools([guarded]), reply("never sent")], {
+        tools: [guardedLogTool],
+        approve: waitForCtrlC,
+      });
+
+      const events = await interruptedTurn(agent, (e, abort) => {
+        if (e.type === "approval_requested") setTimeout(abort, 10);
+      });
+
+      expect(events.slice(-3)).toEqual([
+        { type: "approval_resolved", toolCall: guarded, decision: "deny" },
+        { type: "tool_call_finished", toolCall: guarded, isError: true, preview: CANCELLED },
+        { type: "turn_finished", reason: "interrupted" },
+      ]);
+      expect(agent.messages.at(-1)).toEqual({
+        role: "tool_result",
+        toolCallId: "c1",
+        toolName: "guarded_log",
+        content: CANCELLED,
+        isError: true,
+      });
+      expect(await Bun.file(join(cwd, "log.txt")).exists()).toBe(false);
+      expect(provider.requests).toHaveLength(1);
     });
   });
 });

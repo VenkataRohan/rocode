@@ -259,6 +259,30 @@ describe("OpenRouter Provider", () => {
     expect(JSON.parse(calls[0]!.init.body as string)).not.toHaveProperty("tools");
   });
 
+  test("an interrupted reply is sent with a note that the user interrupted it", async () => {
+    const { http, calls } = replay(await fixture("text-stream.sse"));
+    const provider = createOpenRouterProvider({ apiKey: "sk-test", http });
+
+    await collect(
+      provider.stream(
+        request({
+          messages: [
+            { role: "user", content: "refactor everything" },
+            { role: "assistant", content: "Starting with", toolCalls: [], interrupted: true },
+            { role: "assistant", content: "", toolCalls: [], interrupted: true },
+            { role: "user", content: "stop, just do a.ts" },
+          ],
+        }),
+      ),
+    );
+
+    const body = JSON.parse(calls[0]!.init.body as string);
+    expect(body.messages.slice(1, 3)).toEqual([
+      { role: "assistant", content: "Starting with\n\n[Interrupted by the user]" },
+      { role: "assistant", content: "[Interrupted by the user]" },
+    ]);
+  });
+
   describe("errors end the stream with a typed error event", () => {
     test("401 becomes an auth error pointing at OPENROUTER_API_KEY", async () => {
       const { http } = replay(await fixture("error-401.json"), 401);
