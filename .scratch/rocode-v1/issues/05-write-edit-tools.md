@@ -12,4 +12,4 @@
 - [x] `edit` fails with a "matched N times — add more surrounding context" Tool Result when not unique, and leaves the file untouched
 - [x] Both Tools require Approval; the prompt shows the target path
 - [x] Agent-seam tests assert on file contents in a temp directory, including a scripted not-found → re-read → successful edit self-correction sequence
-- [ ] Manual smoke test: agent fixes a bug in a scratch repo
+- [x] Manual smoke test: agent fixes a bug in a scratch repo

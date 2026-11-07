@@ -15,4 +15,4 @@
 - [x] `read` returns file contents with line numbers, supports offset and line limit
 - [x] Missing file, directory path, unknown Tool, and invalid arguments all produce error Tool Results (unknown Tool error lists available Tools); nothing throws out of the loop
 - [x] `FakeProvider` replays scripted Steps; Agent tests use a temp working directory and assert only on events, Messages, and files
-- [ ] Manual smoke test with a free tool-capable Model
+- [x] Manual smoke test with a free tool-capable Model

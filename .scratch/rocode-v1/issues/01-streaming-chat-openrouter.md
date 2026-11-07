@@ -15,4 +15,4 @@
 - [x] Readable errors for 401, 429 (rate limit), invalid Model id, 5xx, and network failure; the error ends the Turn but the REPL stays alive
 - [x] Multi-turn: earlier Messages are sent on each Turn
 - [x] Provider tests replay recorded SSE fixtures and assert on emitted events, typed errors, and the outgoing request body
-- [ ] Manual smoke test: chat with a free OpenRouter Model
+- [x] Manual smoke test: chat with a free OpenRouter Model
