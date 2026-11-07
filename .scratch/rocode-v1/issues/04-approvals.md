@@ -4,13 +4,13 @@
 
 **Blocked by:** 03 (`bash` Tool with timeout)
 
-**Status:** ready-for-agent
+**Status:** done
 
-- [ ] Agent core calls an injected async Approval handler (returns once / always / deny) for any Tool flagged as requiring Approval
-- [ ] Agent core tracks per-Session "always" grants per Tool; grants do not persist across launches
-- [ ] `read` never asks
-- [ ] Denied Tool Call yields a "user denied" Tool Result and the Turn continues
-- [ ] Agent events emitted for Approval requested / resolved
-- [ ] REPL renders the y/n/a prompt showing the command or path
-- [ ] `--yolo` supplies a handler that always approves
-- [ ] Agent-seam tests with a scripted Approval handler cover once, always, deny, and yolo
+- [x] Agent core calls an injected async Approval handler (returns once / always / deny) for any Tool flagged as requiring Approval
+- [x] Agent core tracks per-Session "always" grants per Tool; grants do not persist across launches
+- [x] `read` never asks
+- [x] Denied Tool Call yields a "user denied" Tool Result and the Turn continues
+- [x] Agent events emitted for Approval requested / resolved
+- [x] REPL renders the y/n/a prompt showing the command or path
+- [x] `--yolo` supplies a handler that always approves
+- [x] Agent-seam tests with a scripted Approval handler cover once, always, deny, and yolo

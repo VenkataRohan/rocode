@@ -4,11 +4,11 @@
 
 **Blocked by:** 02 (Agent Loop with the `read` Tool)
 
-**Status:** ready-for-agent
+**Status:** done
 
-- [ ] `bash` runs a command in the working directory and returns combined stdout/stderr plus exit code
-- [ ] Non-zero exit is a normal Tool Result, not an error that breaks the Turn
-- [ ] Commands time out (default 2 minutes, configurable) and the Tool Result says so; the process is killed
-- [ ] `bash` honours the abort signal by killing its process (used by 06)
-- [ ] `bash` is marked as requiring Approval in the registry (enforced in 04)
-- [ ] Agent-seam tests cover success, non-zero exit, and timeout using real processes in a temp directory
+- [x] `bash` runs a command in the working directory and returns combined stdout/stderr plus exit code
+- [x] Non-zero exit is a normal Tool Result, not an error that breaks the Turn
+- [x] Commands time out (default 2 minutes, configurable) and the Tool Result says so; the process is killed
+- [x] `bash` honours the abort signal by killing its process (used by 06)
+- [x] `bash` is marked as requiring Approval in the registry (enforced in 04)
+- [x] Agent-seam tests cover success, non-zero exit, and timeout using real processes in a temp directory

@@ -4,15 +4,15 @@
 
 **Blocked by:** None (can start immediately)
 
-**Status:** ready-for-agent
+**Status:** done
 
-- [ ] Bun + TypeScript project scaffolded with `bun test` working and a `rocode` entry point
-- [ ] Provider-independent Message types (user, assistant, Tool Result shapes defined even if Tools aren't used yet)
-- [ ] `Provider` interface: given Messages, Tool definitions, Model id, and abort signal, yields a stream of events (text delta, usage, done, error)
-- [ ] OpenRouter Provider parses SSE by hand using an injected HTTP function; nothing outside it sees wire JSON
-- [ ] API key read from `OPENROUTER_API_KEY`; clear startup error if missing
-- [ ] Config merges defaults, `~/.config/rocode/config.json`, and `--provider` / `--model` flags (flags win)
-- [ ] Readable errors for 401, 429 (rate limit), invalid Model id, 5xx, and network failure; the error ends the Turn but the REPL stays alive
-- [ ] Multi-turn: earlier Messages are sent on each Turn
-- [ ] Provider tests replay recorded SSE fixtures and assert on emitted events, typed errors, and the outgoing request body
+- [x] Bun + TypeScript project scaffolded with `bun test` working and a `rocode` entry point
+- [x] Provider-independent Message types (user, assistant, Tool Result shapes defined even if Tools aren't used yet)
+- [x] `Provider` interface: given Messages, Tool definitions, Model id, and abort signal, yields a stream of events (text delta, usage, done, error)
+- [x] OpenRouter Provider parses SSE by hand using an injected HTTP function; nothing outside it sees wire JSON
+- [x] API key read from `OPENROUTER_API_KEY`; clear startup error if missing
+- [x] Config merges defaults, `~/.config/rocode/config.json`, and `--provider` / `--model` flags (flags win)
+- [x] Readable errors for 401, 429 (rate limit), invalid Model id, 5xx, and network failure; the error ends the Turn but the REPL stays alive
+- [x] Multi-turn: earlier Messages are sent on each Turn
+- [x] Provider tests replay recorded SSE fixtures and assert on emitted events, typed errors, and the outgoing request body
 - [ ] Manual smoke test: chat with a free OpenRouter Model

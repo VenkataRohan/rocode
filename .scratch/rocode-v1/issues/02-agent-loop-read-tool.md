@@ -4,15 +4,15 @@
 
 **Blocked by:** 01 (Streaming chat with OpenRouter)
 
-**Status:** ready-for-agent
+**Status:** done
 
-- [ ] Tool registry: each Tool has name, description, JSON-schema input, requires-Approval flag, and execute function (validated args, working directory, abort signal)
-- [ ] OpenRouter Provider accumulates streamed Tool Call argument fragments and emits completed Tool Calls; covered by recorded SSE fixtures
-- [ ] Agent core runs a Turn: Step after Step until the Model replies without Tool Calls
-- [ ] Multiple Tool Calls in one Step execute sequentially in Model order
-- [ ] Step limit per Turn (default 25, configurable); Turn ends with a step-limit reason and the REPL shows a notice
-- [ ] Agent events emitted: text delta, Tool Call started, Tool Call finished (with preview), Step finished, Turn finished (with reason)
-- [ ] `read` returns file contents with line numbers, supports offset and line limit
-- [ ] Missing file, directory path, unknown Tool, and invalid arguments all produce error Tool Results (unknown Tool error lists available Tools); nothing throws out of the loop
-- [ ] `FakeProvider` replays scripted Steps; Agent tests use a temp working directory and assert only on events, Messages, and files
+- [x] Tool registry: each Tool has name, description, JSON-schema input, requires-Approval flag, and execute function (validated args, working directory, abort signal)
+- [x] OpenRouter Provider accumulates streamed Tool Call argument fragments and emits completed Tool Calls; covered by recorded SSE fixtures
+- [x] Agent core runs a Turn: Step after Step until the Model replies without Tool Calls
+- [x] Multiple Tool Calls in one Step execute sequentially in Model order
+- [x] Step limit per Turn (default 25, configurable); Turn ends with a step-limit reason and the REPL shows a notice
+- [x] Agent events emitted: text delta, Tool Call started, Tool Call finished (with preview), Step finished, Turn finished (with reason)
+- [x] `read` returns file contents with line numbers, supports offset and line limit
+- [x] Missing file, directory path, unknown Tool, and invalid arguments all produce error Tool Results (unknown Tool error lists available Tools); nothing throws out of the loop
+- [x] `FakeProvider` replays scripted Steps; Agent tests use a temp working directory and assert only on events, Messages, and files
 - [ ] Manual smoke test with a free tool-capable Model
