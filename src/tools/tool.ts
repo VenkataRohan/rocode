@@ -1,5 +1,6 @@
 import type { ToolCall } from "../messages.ts";
 import type { ToolDefinition } from "../provider.ts";
+import type { Omission } from "../truncation.ts";
 import { validateArguments } from "./validate.ts";
 
 /** What a Tool gets besides its arguments. */
@@ -24,6 +25,8 @@ export type Tool<Args = any> = ToolDefinition & {
   requiresApproval: boolean;
   /** What the user is shown when asked for Approval, e.g. the full command. Defaults to the arguments as `key: value` pairs. */
   approvalSubject?(args: Args): string;
+  /** A hint, added to the Truncation note, on how the Model can get at the part of the Tool Result that was dropped. */
+  truncationHint?(args: Args, omission: Omission): string;
   /** Receives arguments already validated against `inputSchema`. May throw; the registry turns that into an error Tool Result. */
   execute(args: Args, context: ToolContext): Promise<ToolResult>;
 };
@@ -33,6 +36,8 @@ export type PreparedCall = {
   tool: Tool;
   /** What the user is shown when asked for Approval. */
   subject: string;
+  /** The Tool's Truncation hint for this call, if it has one. */
+  truncationHint?(omission: Omission): string;
   /** Executes the Tool. Never throws: a failure becomes an error Tool Result. */
   run(context: ToolContext): Promise<ToolResult>;
 };
@@ -66,6 +71,7 @@ export function createToolRegistry(tools: Tool[]): ToolRegistry {
       return {
         tool,
         subject: tool.approvalSubject?.(call.arguments) ?? formatArguments(call.arguments as Record<string, unknown>),
+        truncationHint: tool.truncationHint && ((omission) => tool.truncationHint!(call.arguments, omission)),
         async run(context) {
           try {
             return await tool.execute(call.arguments, context);

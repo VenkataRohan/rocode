@@ -37,6 +37,7 @@ try {
         cwd: process.cwd(),
         approve: config.yolo ? approveAll : askUser,
         maxSteps: config.maxSteps,
+        truncation: { maxChars: config.toolResultMaxChars, maxLines: config.toolResultMaxLines },
       }),
     header: `${provider.name} · ${config.model}${config.yolo ? " · yolo: Approvals off" : ""}`,
   });

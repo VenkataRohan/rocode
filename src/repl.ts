@@ -170,6 +170,8 @@ class LineQueue {
 class EventRenderer {
   /** Whether the cursor is at the start of a line. */
   private atLineStart = true;
+  /** The Turn's usage, held back so it prints after any "Stopped" or error line. */
+  private usage: Extract<AgentEvent, { type: "usage" }> | undefined;
 
   render(event: AgentEvent) {
     switch (event.type) {
@@ -180,7 +182,7 @@ class EventRenderer {
         this.line(cyan(`● ${event.toolCall.name}(${formatArguments(event.toolCall.arguments)})`));
         break;
       case "tool_call_finished": {
-        const preview = `  ⎿ ${truncate(event.preview.replaceAll("\t", " "), 100)}`;
+        const preview = `  ⎿ ${ellipsize(event.preview.replaceAll("\t", " "), 100)}`;
         this.line(event.isError ? red(preview) : dim(preview));
         break;
       }
@@ -191,6 +193,9 @@ class EventRenderer {
         break;
       case "step_finished":
         break;
+      case "usage":
+        this.usage = event;
+        break;
       case "turn_finished":
         if (event.reason === "step_limit") {
           this.line(yellow("⚠ Stopped: this Turn hit the Step limit. The task may be incomplete; say \"continue\" to keep going."));
@@ -200,6 +205,11 @@ class EventRenderer {
           this.line(red(`✗ ${event.error?.message ?? "The Turn failed."}`));
         } else {
           this.endLine();
+        }
+        if (this.usage) {
+          const { turn, contextTokens } = this.usage;
+          this.line(dim(`  tokens: ${count(turn.inputTokens)} in · ${count(turn.outputTokens)} out · context ${count(contextTokens)}`));
+          this.usage = undefined;
         }
         break;
     }
@@ -224,13 +234,15 @@ class EventRenderer {
 /** Tool Call arguments as `key: value` pairs, each value shortened. */
 function formatArguments(args: unknown): string {
   if (typeof args !== "object" || args === null || Array.isArray(args)) {
-    return truncate(typeof args === "string" ? args : JSON.stringify(args), 80);
+    return ellipsize(typeof args === "string" ? args : JSON.stringify(args), 80);
   }
   return Object.entries(args)
-    .map(([key, value]) => `${key}: ${truncate(JSON.stringify(value), 60)}`)
+    .map(([key, value]) => `${key}: ${ellipsize(JSON.stringify(value), 60)}`)
     .join(", ");
 }
 
-function truncate(text: string, max: number): string {
+const count = (n: number) => n.toLocaleString("en-US");
+
+function ellipsize(text: string, max: number): string {
   return text.length <= max ? text : `${text.slice(0, max - 1)}…`;
 }

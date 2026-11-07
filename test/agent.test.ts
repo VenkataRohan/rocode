@@ -351,8 +351,8 @@ describe("Agent", () => {
   });
 
   describe("bash", () => {
-    const bash = (command: string, options: { timeoutMs?: number } = {}) =>
-      toolResultFor(call("c1", "bash", { command }), { tools: [createBashTool(options)] });
+    const bash = (command: string, options: { timeoutMs?: number } = {}, agentOptions: Partial<AgentOptions> = {}) =>
+      toolResultFor(call("c1", "bash", { command }), { tools: [createBashTool(options)], ...agentOptions });
 
     test("runs in the working directory and returns combined output with the exit code", async () => {
       await writeFile(join(cwd, "hello.txt"), "hi\n");
@@ -375,7 +375,9 @@ describe("Agent", () => {
     });
 
     test("multi-byte characters survive large output", async () => {
-      const result = await bash("for i in $(seq 50000); do printf 'é'; done");
+      const result = await bash("for i in $(seq 50000); do printf 'é'; done", {}, {
+        truncation: { maxChars: 100_000, maxLines: 10 },
+      });
 
       expect(result.content).toBe(`${"é".repeat(50000)}\n\n(exit code 0)`);
     });
@@ -779,6 +781,115 @@ describe("Agent", () => {
       });
       expect(await Bun.file(join(cwd, "log.txt")).exists()).toBe(false);
       expect(provider.requests).toHaveLength(1);
+    });
+  });
+
+  describe("Truncation", () => {
+    test("a bash command with huge output yields a truncated Tool Result that keeps the start, the end, and says what was dropped", async () => {
+      const result = await toolResultFor(call("c1", "bash", { command: "seq 1 100000" }), {
+        tools: [createBashTool()],
+        truncation: { maxLines: 10, maxChars: 100_000 },
+      });
+
+      expect(result).toMatchObject({
+        isError: false,
+        content:
+          "1\n2\n3\n4\n5\n" +
+          "\n[... 99992 lines (588866 characters) omitted: the Tool Result was too long ...]\n\n" +
+          "99998\n99999\n100000\n\n(exit code 0)",
+      });
+    });
+
+    test("one huge line is cut by characters, keeping part of it from each end", async () => {
+      const result = await toolResultFor(call("c1", "bash", { command: "printf 'x%.0s' $(seq 1000)" }), {
+        tools: [createBashTool()],
+        truncation: { maxLines: 100, maxChars: 100 },
+      });
+
+      expect(result.content).toBe(
+        `${"x".repeat(50)}\n` +
+          "\n[... 1 line (915 characters) omitted: the Tool Result was too long ...]\n\n" +
+          `${"x".repeat(35)}\n\n(exit code 0)`,
+      );
+    });
+
+    test("cutting inside a line never splits a character in two", async () => {
+      const result = await toolResultFor(call("c1", "bash", { command: "for i in $(seq 100); do printf '😀'; done" }), {
+        tools: [createBashTool()],
+        truncation: { maxLines: 100, maxChars: 43 },
+      });
+
+      const loneSurrogate = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/;
+      expect(result.content).toContain("omitted: the Tool Result was too long");
+      expect(result.content).not.toMatch(loneSurrogate);
+    });
+
+    test("a truncated read tells the Model how to page to the omitted lines with offset and limit", async () => {
+      await writeFile(join(cwd, "big.txt"), Array.from({ length: 100 }, (_, i) => `line ${i + 1}\n`).join(""));
+
+      const result = await toolResultFor(call("c1", "read", { path: "big.txt" }), {
+        truncation: { maxLines: 10, maxChars: 100_000 },
+      });
+
+      expect(result.content).toBe(
+        "1\tline 1\n2\tline 2\n3\tline 3\n4\tline 4\n5\tline 5\n" +
+          "\n[... 90 lines (982 characters) omitted: the Tool Result was too long. " +
+          "To see them, read big.txt with offset=6 and limit=90 ...]\n\n" +
+          "96\tline 96\n97\tline 97\n98\tline 98\n99\tline 99\n100\tline 100",
+      );
+    });
+
+    test("the hint accounts for the offset the Model already read from", async () => {
+      await writeFile(join(cwd, "big.txt"), Array.from({ length: 100 }, (_, i) => `line ${i + 1}\n`).join(""));
+
+      const result = await toolResultFor(call("c1", "read", { path: "big.txt", offset: 41, limit: 20 }), {
+        truncation: { maxLines: 10, maxChars: 100_000 },
+      });
+
+      expect(result.content).toContain("To see them, read big.txt with offset=46 and limit=12 ...]");
+    });
+
+    test("every Tool Result is truncated, errors included", async () => {
+      const huge = call("c1", "read", {});
+      huge.arguments = null;
+      huge.unparsedArguments = "{".repeat(1000);
+
+      const result = await toolResultFor(huge, { truncation: { maxLines: 10, maxChars: 100 } });
+
+      expect(result.isError).toBe(true);
+      expect(result.content).toContain("omitted: the Tool Result was too long");
+      expect(result.content.length).toBeLessThan(250);
+    });
+  });
+
+  describe("Usage", () => {
+    test("a Turn reports its total token usage, and how big the context last was, just before it finishes", async () => {
+      await writeFile(join(cwd, "a.txt"), "a\n");
+      const readA = call("c1", "read", { path: "a.txt" });
+      const { agent } = setup([
+        [...callTools([readA]).slice(0, -1), { type: "usage", usage: { inputTokens: 100, outputTokens: 20 } }, { type: "done" }],
+        [{ type: "text_delta", text: "ok" }, { type: "usage", usage: { inputTokens: 130, outputTokens: 5 } }, { type: "done" }],
+      ]);
+
+      const events = await runTurn(agent, "read a");
+
+      expect(events.slice(-3)).toEqual([
+        { type: "step_finished", step: 2 },
+        { type: "usage", turn: { inputTokens: 230, outputTokens: 25 }, contextTokens: 135 },
+        { type: "turn_finished", reason: "completed" },
+      ]);
+      expect(agent.messages.filter((m) => m.role === "assistant").map((m) => m.usage)).toEqual([
+        { inputTokens: 100, outputTokens: 20 },
+        { inputTokens: 130, outputTokens: 5 },
+      ]);
+    });
+
+    test("a Turn whose Provider reported no usage reports none", async () => {
+      const { agent } = setup([reply("hi")]);
+
+      const events = await runTurn(agent, "hello");
+
+      expect(events.some((e) => e.type === "usage")).toBe(false);
     });
   });
 

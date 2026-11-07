@@ -1,10 +1,11 @@
 // The Agent core: owns the conversation and runs the Agent Loop.
 // It emits Agent events and knows nothing about the terminal, so any UI can render them.
 
-import type { AssistantMessage, Message, ToolCall } from "./messages.ts";
+import type { AssistantMessage, Message, ToolCall, Usage } from "./messages.ts";
 import type { Provider, ProviderError } from "./provider.ts";
 import { buildSystemPrompt, currentOs, loadProjectInstructions } from "./system-prompt.ts";
-import { createToolRegistry, errorResult, type Tool, type ToolResult } from "./tools/tool.ts";
+import { createToolRegistry, errorResult, type PreparedCall, type Tool, type ToolResult } from "./tools/tool.ts";
+import { DEFAULT_TRUNCATION, truncate, type TruncationBudget } from "./truncation.ts";
 
 export type TurnFinishReason =
   | "completed" // the Model replied without Tool Calls
@@ -19,6 +20,11 @@ export type AgentEvent =
   | { type: "approval_resolved"; toolCall: ToolCall; decision: ApprovalDecision }
   | { type: "tool_call_finished"; toolCall: ToolCall; isError: boolean; preview: string }
   | { type: "step_finished"; step: number }
+  /**
+   * Sent just before `turn_finished` when the Provider reported usage. `turn` sums every Step's tokens;
+   * `contextTokens` is the last Step's input plus output: about how much of the context window the conversation fills.
+   */
+  | { type: "usage"; turn: Usage; contextTokens: number }
   | { type: "turn_finished"; reason: TurnFinishReason; error?: ProviderError };
 
 /** How the user answered an Approval: allow this Tool Call, allow the Tool for the rest of the Session, or refuse. */
@@ -46,6 +52,8 @@ export type AgentOptions = {
   approve: ApprovalHandler;
   /** Most Steps one Turn may take before it is stopped. */
   maxSteps?: number;
+  /** How much of each Tool Result the Model sees; anything longer is truncated. */
+  truncation?: TruncationBudget;
   /** The clock, for today's date in the system prompt. */
   now?: () => Date;
 };
@@ -60,7 +68,8 @@ export type Agent = {
 };
 
 export function createAgent(options: AgentOptions): Agent {
-  const { provider, model, cwd, approve, maxSteps = DEFAULT_MAX_STEPS, now = () => new Date() } = options;
+  const { provider, model, cwd, approve, maxSteps = DEFAULT_MAX_STEPS, truncation = DEFAULT_TRUNCATION, now = () => new Date() } =
+    options;
   const registry = createToolRegistry(options.tools);
   const messages: Message[] = [];
   /** Tools the user allowed "always". Lives only as long as this Agent, so grants never outlast the Session. */
@@ -76,11 +85,23 @@ export function createAgent(options: AgentOptions): Agent {
     return cachedSystemPrompt;
   }
 
-  /** Asks for Approval if needed, then runs the Tool Call. Yields Approval events; returns the Tool Result. */
-  async function* approveAndRun(toolCall: ToolCall, signal: AbortSignal): AsyncGenerator<AgentEvent, ToolResult> {
+  /** Runs a Tool Call (asking for Approval if needed) and truncates its Tool Result. Yields Approval events. */
+  async function* runToolCall(toolCall: ToolCall, signal: AbortSignal): AsyncGenerator<AgentEvent, ToolResult> {
     const prepared = registry.prepare(toolCall);
-    if ("error" in prepared) return prepared.error;
+    if ("error" in prepared) return truncateResult(prepared.error);
+    return truncateResult(yield* approveAndRun(prepared, toolCall, signal), prepared.truncationHint);
+  }
 
+  function truncateResult(result: ToolResult, hint?: PreparedCall["truncationHint"]): ToolResult {
+    return { ...result, content: truncate(result.content, truncation, hint) };
+  }
+
+  /** Asks for Approval if needed, then runs the Tool Call. Yields Approval events; returns the Tool Result. */
+  async function* approveAndRun(
+    prepared: PreparedCall,
+    toolCall: ToolCall,
+    signal: AbortSignal,
+  ): AsyncGenerator<AgentEvent, ToolResult> {
     const { tool } = prepared;
     if (tool.requiresApproval && !alwaysAllowed.has(tool.name)) {
       const { subject } = prepared;
@@ -111,6 +132,22 @@ export function createAgent(options: AgentOptions): Agent {
   }
 
   async function* runTurn(text: string, signal: AbortSignal): AsyncGenerator<AgentEvent> {
+    const stepUsage: Usage[] = [];
+    for await (const event of runSteps(text, signal, stepUsage)) {
+      const last = stepUsage.at(-1);
+      if (event.type === "turn_finished" && last) {
+        const turn = {
+          inputTokens: sum(stepUsage.map((u) => u.inputTokens)),
+          outputTokens: sum(stepUsage.map((u) => u.outputTokens)),
+        };
+        yield { type: "usage", turn, contextTokens: last.inputTokens + last.outputTokens };
+      }
+      yield event;
+    }
+  }
+
+  /** The Agent Loop for one Turn. Records each Step's usage, as the Provider reports it, in `usage`. */
+  async function* runSteps(text: string, signal: AbortSignal, usage: Usage[]): AsyncGenerator<AgentEvent> {
     const system = await systemPrompt();
     messages.push({ role: "user", content: text });
 
@@ -124,6 +161,10 @@ export function createAgent(options: AgentOptions): Agent {
             break;
           case "tool_call":
             reply.toolCalls.push(event.toolCall);
+            break;
+          case "usage":
+            reply.usage = event.usage;
+            usage.push(event.usage);
             break;
           case "error":
             if (signal.aborted) {
@@ -143,7 +184,7 @@ export function createAgent(options: AgentOptions): Agent {
       for (const toolCall of reply.toolCalls) {
         if (signal.aborted) break;
         yield { type: "tool_call_started", toolCall };
-        const result = yield* approveAndRun(toolCall, signal);
+        const result = yield* runToolCall(toolCall, signal);
         messages.push({
           role: "tool_result",
           toolCallId: toolCall.id,
@@ -173,6 +214,8 @@ export function createAgent(options: AgentOptions): Agent {
 
   return { messages, runTurn };
 }
+
+const sum = (values: number[]) => values.reduce((a, b) => a + b, 0);
 
 const CANCELLED = "Cancelled by the user: the Turn was interrupted before this tool call ran.";
 

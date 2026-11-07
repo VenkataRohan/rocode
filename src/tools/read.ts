@@ -20,6 +20,10 @@ export const readTool: Tool<ReadArgs> = {
     required: ["path"],
   },
   requiresApproval: false,
+  // Line i of the output is line offset + i of the file, so omitted output lines map straight to a window.
+  // (If the omission reaches read's own "Showing lines" footer, the limit overshoots by a line or two: harmless.)
+  truncationHint: ({ path, offset = 1 }, { firstLine, lineCount }) =>
+    `To see them, read ${path} with offset=${offset + firstLine} and limit=${lineCount}`,
 
   async execute({ path, offset = 1, limit }, { cwd }) {
     const fullPath = resolve(cwd, path);

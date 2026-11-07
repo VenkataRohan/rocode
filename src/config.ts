@@ -3,6 +3,7 @@ import { join } from "node:path";
 import { parseArgs } from "node:util";
 import { DEFAULT_MAX_STEPS } from "./agent.ts";
 import { DEFAULT_BASH_TIMEOUT_MS } from "./tools/bash.ts";
+import { DEFAULT_TRUNCATION } from "./truncation.ts";
 
 export const PROVIDERS = ["openrouter"] as const;
 export type ProviderName = (typeof PROVIDERS)[number];
@@ -14,18 +15,31 @@ export type Config = {
   maxSteps: number;
   /** How long a `bash` command may run before it is killed. */
   bashTimeoutSeconds: number;
+  /** Most characters of a Tool Result the Model sees; the rest is truncated. Config file only. */
+  toolResultMaxChars: number;
+  /** Most lines of a Tool Result the Model sees; the rest is truncated. Config file only. */
+  toolResultMaxLines: number;
   /** Skip all Approvals. CLI flag only, so a config file can't silently turn off safety. */
   yolo: boolean;
 };
 
 /** Unvalidated values from the config file or CLI flags. */
-type RawConfig = Partial<{ provider: string; model: string; maxSteps: number; bashTimeoutSeconds: number }>;
+type RawConfig = Partial<{
+  provider: string;
+  model: string;
+  maxSteps: number;
+  bashTimeoutSeconds: number;
+  toolResultMaxChars: number;
+  toolResultMaxLines: number;
+}>;
 
 const DEFAULTS: Omit<Config, "yolo"> = {
   provider: "openrouter",
   model: "google/gemma-4-31b-it:free",
   maxSteps: DEFAULT_MAX_STEPS,
   bashTimeoutSeconds: DEFAULT_BASH_TIMEOUT_MS / 1000,
+  toolResultMaxChars: DEFAULT_TRUNCATION.maxChars,
+  toolResultMaxLines: DEFAULT_TRUNCATION.maxLines,
 };
 
 const USAGE = "Usage: rocode [--provider <name>] [--model <id>] [--max-steps <n>] [--bash-timeout <seconds>] [--yolo]";
@@ -50,6 +64,8 @@ export async function loadConfig(
     model: merged.model,
     maxSteps: merged.maxSteps,
     bashTimeoutSeconds: merged.bashTimeoutSeconds,
+    toolResultMaxChars: merged.toolResultMaxChars,
+    toolResultMaxLines: merged.toolResultMaxLines,
     yolo: flags.yolo ?? false,
   };
 }
@@ -114,11 +130,11 @@ async function readConfigFile(path: string): Promise<RawConfig> {
     }
     out[key] = value;
   }
-  if (values.maxSteps !== undefined) {
-    if (!isPositiveInteger(values.maxSteps)) {
-      throw new ConfigError(`"maxSteps" in ${path} must be a positive integer.`);
-    }
-    out.maxSteps = values.maxSteps;
+  for (const key of ["maxSteps", "toolResultMaxChars", "toolResultMaxLines"] as const) {
+    const value = values[key];
+    if (value === undefined) continue;
+    if (!isPositiveInteger(value)) throw new ConfigError(`"${key}" in ${path} must be a positive integer.`);
+    out[key] = value;
   }
   if (values.bashTimeoutSeconds !== undefined) {
     if (!isTimeoutSeconds(values.bashTimeoutSeconds)) {
