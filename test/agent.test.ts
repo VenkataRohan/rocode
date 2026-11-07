@@ -781,4 +781,54 @@ describe("Agent", () => {
       expect(provider.requests).toHaveLength(1);
     });
   });
+
+  describe("System prompt", () => {
+    /** The system Message the Model saw at the start of a request. */
+    function systemPrompt(provider: FakeProvider, request = 0): string {
+      const first = provider.requests[request]![0]!;
+      expect(first.role).toBe("system");
+      return first.content;
+    }
+
+    test("tells the Model its working directory, OS, today's date, and available Tools", async () => {
+      const { agent, provider } = setup([reply("hi")], {
+        tools: [readTool, logTool],
+        now: () => new Date(2026, 10, 7, 15, 30),
+      });
+      await runTurn(agent, "hello");
+
+      const prompt = systemPrompt(provider);
+      expect(prompt).toContain(cwd);
+      expect(prompt).toContain(process.platform);
+      expect(prompt).toContain("2026-11-07");
+      expect(prompt).toContain(`read: ${readTool.description}`);
+      expect(prompt).toContain("log: Append a label to log.txt");
+      expect(prompt).not.toContain("Project Instructions");
+      expect(provider.requests[0]!.slice(1)).toEqual([{ role: "user", content: "hello" }]);
+    });
+
+    test("includes AGENTS.md from the working directory as Project Instructions", async () => {
+      await writeFile(join(cwd, "AGENTS.md"), "Always run `bun test` before finishing.\n");
+      const { agent, provider } = setup([reply("ok")]);
+      await runTurn(agent, "hello");
+
+      const prompt = systemPrompt(provider);
+      expect(prompt).toContain("# Project Instructions");
+      expect(prompt).toContain("Always run `bun test` before finishing.");
+      expect(prompt).toContain(cwd);
+    });
+
+    test("starts every request, across Steps and Turns, without entering the conversation", async () => {
+      await writeFile(join(cwd, "notes.txt"), "x\n");
+      const { agent, provider } = setup([callTools([call("c1", "read", { path: "notes.txt" })]), reply("done"), reply("again")]);
+      await runTurn(agent, "first");
+      await runTurn(agent, "second");
+
+      expect(provider.requests).toHaveLength(3);
+      const first = systemPrompt(provider, 0);
+      expect(systemPrompt(provider, 1)).toBe(first);
+      expect(systemPrompt(provider, 2)).toBe(first);
+      expect(agent.messages.some((m) => m.role === "system")).toBe(false);
+    });
+  });
 });

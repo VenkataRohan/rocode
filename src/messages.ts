@@ -16,6 +16,12 @@ export type ToolCall = {
   unparsedArguments?: string;
 };
 
+/** Tells the Model where it is and how to behave; sent first in every request. */
+export type SystemMessage = {
+  role: "system";
+  content: string;
+};
+
 export type UserMessage = {
   role: "user";
   content: string;
@@ -39,4 +45,4 @@ export type ToolResultMessage = {
   isError: boolean;
 };
 
-export type Message = UserMessage | AssistantMessage | ToolResultMessage;
+export type Message = SystemMessage | UserMessage | AssistantMessage | ToolResultMessage;

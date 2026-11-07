@@ -15,6 +15,7 @@ export type OpenRouterOptions = {
 // --- Wire shapes (OpenAI Chat Completions) ---
 
 type WireMessage =
+  | { role: "system"; content: string }
   | { role: "user"; content: string }
   | {
       role: "assistant";
@@ -255,6 +256,8 @@ const INTERRUPTED_NOTE = "[Interrupted by the user]";
 
 function toWireMessage(message: Message): WireMessage {
   switch (message.role) {
+    case "system":
+      return { role: "system", content: message.content };
     case "user":
       return { role: "user", content: message.content };
     case "assistant": {
