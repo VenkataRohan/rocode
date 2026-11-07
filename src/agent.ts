@@ -1,7 +1,7 @@
 // The Agent core: owns the conversation and runs the Agent Loop.
 // It emits Agent events and knows nothing about the terminal, so any UI can render them.
 
-import type { AssistantMessage, Message, SystemMessage, ToolCall } from "./messages.ts";
+import type { AssistantMessage, Message, ToolCall } from "./messages.ts";
 import type { Provider, ProviderError } from "./provider.ts";
 import { buildSystemPrompt, currentOs, loadProjectInstructions } from "./system-prompt.ts";
 import { createToolRegistry, errorResult, type Tool, type ToolResult } from "./tools/tool.ts";
@@ -53,7 +53,7 @@ export type AgentOptions = {
 export const DEFAULT_MAX_STEPS = 25;
 
 export type Agent = {
-  /** The conversation so far, oldest first. The system prompt isn't part of it. */
+  /** The conversation so far, oldest first. */
   readonly messages: readonly Message[];
   /** Runs one Turn for a user message, streaming Agent events until it ends. Never throws. */
   runTurn(text: string, signal: AbortSignal): AsyncGenerator<AgentEvent>;
@@ -66,17 +66,14 @@ export function createAgent(options: AgentOptions): Agent {
   /** Tools the user allowed "always". Lives only as long as this Agent, so grants never outlast the Session. */
   const alwaysAllowed = new Set<string>();
   /** Built on the first Turn and kept for the Session, so the Model's instructions don't shift mid-conversation. */
-  let cachedSystemMessage: SystemMessage | undefined;
+  let cachedSystemPrompt: string | undefined;
 
-  async function systemMessage(): Promise<SystemMessage> {
-    cachedSystemMessage ??= {
-      role: "system",
-      content: buildSystemPrompt(
-        { cwd, os: currentOs(), date: now(), tools: registry.definitions },
-        await loadProjectInstructions(cwd),
-      ),
-    };
-    return cachedSystemMessage;
+  async function systemPrompt(): Promise<string> {
+    cachedSystemPrompt ??= buildSystemPrompt(
+      { cwd, os: currentOs(), date: now(), tools: registry.definitions },
+      await loadProjectInstructions(cwd),
+    );
+    return cachedSystemPrompt;
   }
 
   /** Asks for Approval if needed, then runs the Tool Call. Yields Approval events; returns the Tool Result. */
@@ -114,12 +111,12 @@ export function createAgent(options: AgentOptions): Agent {
   }
 
   async function* runTurn(text: string, signal: AbortSignal): AsyncGenerator<AgentEvent> {
-    const system = await systemMessage();
+    const system = await systemPrompt();
     messages.push({ role: "user", content: text });
 
     for (let step = 1; ; step++) {
       const reply: AssistantMessage = { role: "assistant", content: "", toolCalls: [] };
-      for await (const event of provider.stream({ messages: [system, ...messages], tools: registry.definitions, model, signal })) {
+      for await (const event of provider.stream({ system, messages, tools: registry.definitions, model, signal })) {
         switch (event.type) {
           case "text_delta":
             reply.content += event.text;

@@ -15,6 +15,8 @@ export class FakeProvider implements Provider {
   readonly name = "fake";
   /** Snapshots of the Messages each request carried, for asserting what the Model saw. */
   readonly requests: Message[][] = [];
+  /** The system prompt each request carried. */
+  readonly systemPrompts: (string | undefined)[] = [];
   /** Whether each request's abort signal had fired by the time its stream ended. */
   readonly aborted: boolean[] = [];
   private steps: ScriptedStep[];
@@ -25,6 +27,7 @@ export class FakeProvider implements Provider {
 
   async *stream(request: StreamRequest): AsyncGenerator<ProviderEvent> {
     this.requests.push(structuredClone(request.messages));
+    this.systemPrompts.push(request.system);
     const step = this.steps.shift();
     if (!step) {
       yield { type: "error", error: { kind: "server", message: "FakeProvider: no more scripted Steps" } };

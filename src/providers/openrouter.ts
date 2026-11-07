@@ -240,7 +240,11 @@ async function errorDetail(response: Response): Promise<string> {
 function toWireRequest(request: StreamRequest) {
   return {
     model: request.model,
-    messages: request.messages.map(toWireMessage),
+    // The wire format carries the system prompt as the first message.
+    messages: [
+      ...(request.system ? [{ role: "system", content: request.system } as const] : []),
+      ...request.messages.map(toWireMessage),
+    ],
     stream: true,
     stream_options: { include_usage: true },
     ...(request.tools.length > 0 && {
@@ -256,8 +260,6 @@ const INTERRUPTED_NOTE = "[Interrupted by the user]";
 
 function toWireMessage(message: Message): WireMessage {
   switch (message.role) {
-    case "system":
-      return { role: "system", content: message.content };
     case "user":
       return { role: "user", content: message.content };
     case "assistant": {

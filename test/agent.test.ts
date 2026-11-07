@@ -783,11 +783,11 @@ describe("Agent", () => {
   });
 
   describe("System prompt", () => {
-    /** The system Message the Model saw at the start of a request. */
+    /** The system prompt the Model saw with a request. */
     function systemPrompt(provider: FakeProvider, request = 0): string {
-      const first = provider.requests[request]![0]!;
-      expect(first.role).toBe("system");
-      return first.content;
+      const prompt = provider.systemPrompts[request];
+      if (prompt === undefined) throw new Error(`request ${request} had no system prompt`);
+      return prompt;
     }
 
     test("tells the Model its working directory, OS, today's date, and available Tools", async () => {
@@ -804,7 +804,7 @@ describe("Agent", () => {
       expect(prompt).toContain(`read: ${readTool.description}`);
       expect(prompt).toContain("log: Append a label to log.txt");
       expect(prompt).not.toContain("Project Instructions");
-      expect(provider.requests[0]!.slice(1)).toEqual([{ role: "user", content: "hello" }]);
+      expect(provider.requests[0]).toEqual([{ role: "user", content: "hello" }]);
     });
 
     test("includes AGENTS.md from the working directory as Project Instructions", async () => {
@@ -818,7 +818,7 @@ describe("Agent", () => {
       expect(prompt).toContain(cwd);
     });
 
-    test("starts every request, across Steps and Turns, without entering the conversation", async () => {
+    test("is sent unchanged with every request, across Steps and Turns", async () => {
       await writeFile(join(cwd, "notes.txt"), "x\n");
       const { agent, provider } = setup([callTools([call("c1", "read", { path: "notes.txt" })]), reply("done"), reply("again")]);
       await runTurn(agent, "first");
@@ -828,7 +828,6 @@ describe("Agent", () => {
       const first = systemPrompt(provider, 0);
       expect(systemPrompt(provider, 1)).toBe(first);
       expect(systemPrompt(provider, 2)).toBe(first);
-      expect(agent.messages.some((m) => m.role === "system")).toBe(false);
     });
   });
 });

@@ -259,17 +259,15 @@ describe("OpenRouter Provider", () => {
     expect(JSON.parse(calls[0]!.init.body as string)).not.toHaveProperty("tools");
   });
 
-  test("the system prompt is sent as a system message", async () => {
+  test("the system prompt is sent as the first message", async () => {
     const { http, calls } = replay(await fixture("text-stream.sse"));
     const provider = createOpenRouterProvider({ apiKey: "sk-test", http });
 
     await collect(
       provider.stream(
         request({
-          messages: [
-            { role: "system", content: "You are rocode." },
-            { role: "user", content: "hi" },
-          ],
+          system: "You are rocode.",
+          messages: [{ role: "user", content: "hi" }],
         }),
       ),
     );

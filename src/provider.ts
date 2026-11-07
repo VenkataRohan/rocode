@@ -33,6 +33,8 @@ export type ProviderEvent =
   | { type: "error"; error: ProviderError };
 
 export type StreamRequest = {
+  /** The system prompt: tells the Model where it is and how to behave. Kept apart from the conversation. */
+  system?: string;
   messages: Message[];
   tools: ToolDefinition[];
   model: string;
