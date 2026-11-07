@@ -4,10 +4,10 @@
 
 **Blocked by:** 03 (`bash` Tool with timeout)
 
-**Status:** ready-for-agent
+**Status:** done
 
-- [ ] Truncation applied uniformly to every Tool Result (character and line budget, configurable defaults)
-- [ ] Truncated results include a note stating how much was dropped (and, for `read`, how to page with offset/limit)
-- [ ] Providers emit usage events; the Agent core reports usage per Turn
-- [ ] REPL prints a usage line after each Turn
-- [ ] Agent-seam tests: a `bash` command producing huge output yields a truncated Tool Result with the note; usage from `FakeProvider` surfaces in Turn events
+- [x] Truncation applied uniformly to every Tool Result (character and line budget, configurable defaults)
+- [x] Truncated results include a note stating how much was dropped (and, for `read`, how to page with offset/limit)
+- [x] Providers emit usage events; the Agent core reports usage per Turn
+- [x] REPL prints a usage line after each Turn
+- [x] Agent-seam tests: a `bash` command producing huge output yields a truncated Tool Result with the note; usage from `FakeProvider` surfaces in Turn events
