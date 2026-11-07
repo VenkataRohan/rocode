@@ -9,4 +9,4 @@
 - [ ] System prompt built from a fixed template filled with working directory, OS, date, and Tool list
 - [ ] `AGENTS.md` in the working directory is appended as Project Instructions when present
 - [ ] rocode works normally when no `AGENTS.md` exists
-- [ ] Agent-seam tests assert (via the Messages the `FakeProvider` receives) that the system prompt contains the environment details and, when present, the Project Instructions
+- [ ] Agent-seam tests assert (via the `system` field of the requests the `FakeProvider` receives) that the system prompt contains the environment details and, when present, the Project Instructions
